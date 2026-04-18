@@ -1,5 +1,47 @@
 # CHANGELOG
 
+## Unreleased — perf pass 3: try_acquire + deque + lazy JSON + Arc<Notification>
+
+Four targeted changes, each validated by bench. Ordered by impact.
+
+### Changes
+
+- **`collections.deque` for iterator buffers.** `_StreamIter._buffer` and
+  `_WorkerQueueIter._buffer` were `list` and yielded via `list.pop(0)`
+  which is O(n). Swapped for `deque` + `popleft()` (O(1)). `_StreamIter`
+  refreshes in batches of 1000 rows; the old code was spending
+  quadratic time shifting each popped row's successors leftward.
+- **Writer-mutex `try_acquire` fast-path** on `litenotify.Transaction.
+  __enter__`. If the slot is free at `parking_lot::Mutex::lock()` time,
+  take it without `py.detach` (saves ~5us/tx of GIL release+reacquire).
+  Slow path still drops GIL before blocking on the condvar.
+- **Lazy `json.loads` on `Job.payload` / `Event.payload`.** Previously
+  `__init__` unconditionally decoded the payload column. Now a
+  `@property` decodes on first access via a sentinel-guarded cache.
+  Handlers that only read `job.id` / `job.worker_id` skip N JSON parses
+  per batch.
+- **`Arc<Notification>` in honker's broadcast channel.** The commit hook's
+  fan-out loop cloned a `Notification { channel: String, payload: String }`
+  per subscriber. Swapped to `broadcast::Sender<Arc<Notification>>` so
+  subscriber sends are ref-count bumps, not `String` reallocations. No
+  user-visible change (Python side still copies strings into a
+  `NotificationResult` once per delivery, same as before).
+
+### Numbers (median of 3, release build, M-series)
+
+| Operation | Before | After this pass | Pass-1 baseline |
+|-----------|--------|-----------------|-----------------|
+| enqueue (1/tx) | ~5,000 /s | ~6,000 /s | same |
+| enqueue (100/tx) | ~94,000 /s | ~110,000 /s | ~45,000 |
+| claim + ack | ~3,100 /s | ~3,700 /s | ~1,000 |
+| claim_batch+ack_batch (32) | ~48,500 /s | ~60,000 /s | n/a |
+| claim_batch+ack_batch (128) | ~61,000 /s | ~80,000 /s | n/a |
+| end-to-end (async iter) | ~3,050 /s | ~3,500 /s | ~820 |
+| **stream replay** | ~400,000 /s | **~1,000,000 /s** | ~319,000 |
+| stream live e2e p50 | 0.24ms | 0.23ms | ~52ms (harness bug) |
+
+All 12 Rust + 109 Python tests still pass.
+
 ## Unreleased — perf pass 2: the real claim bottleneck
 
 Previous "perf pass 1" claim was `synchronous=NORMAL` puts us on a fsync

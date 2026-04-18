@@ -47,6 +47,16 @@ impl Writer {
         guard.take().unwrap()
     }
 
+    /// Non-blocking take. Returns `Some(Connection)` if the slot is free at
+    /// lock time, otherwise `None` — caller must fall back to `acquire` (and
+    /// should drop the GIL around it so other Python threads can run while
+    /// we wait). Used by the `__enter__` fast-path to skip `py.detach` on
+    /// the uncontended single-writer case.
+    fn try_acquire(&self) -> Option<Connection> {
+        let mut guard = self.slot.lock();
+        guard.take()
+    }
+
     fn release(&self, conn: Connection) {
         let mut guard = self.slot.lock();
         *guard = Some(conn);
@@ -291,7 +301,18 @@ impl Drop for Transaction {
 impl Transaction {
     fn __enter__<'a>(slf: PyRef<'a, Self>, py: Python<'a>) -> PyResult<PyRef<'a, Self>> {
         let writer = slf.writer.clone();
-        let conn = py.detach(|| writer.acquire());
+        // Fast path: if the writer slot is immediately free, take it under
+        // the parking_lot mutex without releasing the GIL. Uncontended
+        // single-writer workloads (the bench, most web apps with a single
+        // process, most workers) avoid py.detach's GIL release+reacquire
+        // (~5us savings per tx, measurable at 5k+ ops/s).
+        //
+        // Slow path: slot is held — drop the GIL so other Python threads
+        // can run while we block on the condvar.
+        let conn = match writer.try_acquire() {
+            Some(c) => c,
+            None => py.detach(|| writer.acquire()),
+        };
         match run_cached_noparams(&conn, "BEGIN IMMEDIATE") {
             Ok(()) => {
                 {
@@ -417,7 +438,7 @@ struct NotificationResult {
 }
 
 struct ListenerState {
-    rx: Option<tokio::sync::broadcast::Receiver<Notification>>,
+    rx: Option<tokio::sync::broadcast::Receiver<Arc<Notification>>>,
     queue: Option<Py<PyAny>>,
 }
 

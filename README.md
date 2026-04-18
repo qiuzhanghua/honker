@@ -24,14 +24,14 @@ Apple Silicon M-series, WAL + `synchronous=NORMAL`, release build, April 2026. M
 
 | Operation | Throughput / latency | Notes |
 |-----------|----------------------|-------|
-| `enqueue` (1 job / tx) | ~5,000 /s | `BEGIN IMMEDIATE` + INSERT (5 cols + index) + `honk` + COMMIT. WAL + `synchronous=NORMAL` (no per-commit fsync); bottleneck is PyO3+mutex+GIL per tx. |
-| `enqueue` (100 jobs / tx) | ~94,000 /s | Batched into one `COMMIT`. |
-| `claim + ack` (1 job) | ~3,100 /s | Two write transactions per job. |
-| `claim_batch + ack_batch` (32) | ~48,000 /s | One tx claims 32 jobs, one tx acks them. |
-| `claim_batch + ack_batch` (128) | ~61,000 /s | Same, larger batch. |
-| `publish` (1 event / tx) | ~5,700 /s | Wider per-row cost than queue enqueue. |
-| replay | ~400,000 /s | Reader-pool `SELECT`, no write lock. |
-| live stream e2e | **p50 = 0.24ms**, p99 = 8ms | Publish to consumer wake. |
+| `enqueue` (1 job / tx) | ~6,000 /s | `BEGIN IMMEDIATE` + INSERT (5 cols + index) + `honk` + COMMIT. WAL + `synchronous=NORMAL` (no per-commit fsync); bottleneck is PyO3+mutex+GIL per tx. |
+| `enqueue` (100 jobs / tx) | ~110,000 /s | Batched into one `COMMIT`. |
+| `claim + ack` (1 job) | ~3,700 /s | Two write transactions per job. |
+| `claim_batch + ack_batch` (32) | ~60,000 /s | One tx claims 32 jobs, one tx acks them. |
+| `claim_batch + ack_batch` (128) | ~80,000 /s | Same, larger batch. |
+| `publish` (1 event / tx) | ~5,800 /s | Wider per-row cost than queue enqueue. |
+| replay | **~1,000,000 /s** | Reader-pool `SELECT`, no write lock. |
+| live stream e2e | **p50 = 0.23ms**, p99 = 7ms | Publish to consumer wake. |
 
 For context, raw Python `sqlite3` single-tx on the same file is ~47k/s (WAL ceiling on this machine). Our single-tx is ~4x slower than that because of PyO3 crossings, a writer mutex, and GIL detach/reacquire. Batching amortizes these costs and closes the gap.
 

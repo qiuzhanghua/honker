@@ -37,15 +37,21 @@ pub struct Notification {
 
 /// Per-subscriber handle; drop this (via `Notifier::unsubscribe`) to release
 /// the registry slot.
+///
+/// The channel carries `Arc<Notification>` rather than `Notification` so
+/// the fan-out loop in the commit hook only does a ref-count bump per
+/// subscriber, not a `String` realloc for `channel` + `payload`. For a honk
+/// with N subscribers this turns the fan-out from O(N * payload_len) into
+/// O(N atomic increments).
 pub struct Subscription {
     pub id: u64,
     pub channel: String,
-    pub rx: broadcast::Receiver<Notification>,
+    pub rx: broadcast::Receiver<Arc<Notification>>,
 }
 
 struct SubscriberEntry {
     id: u64,
-    tx: broadcast::Sender<Notification>,
+    tx: broadcast::Sender<Arc<Notification>>,
 }
 
 #[derive(Default)]
@@ -146,8 +152,11 @@ impl Notifier {
             let registry = inner_commit.lock();
             for notif in drained {
                 if let Some(subs) = registry.by_channel.get(&notif.channel) {
+                    // Wrap the notification once; subscriber sends clone
+                    // the Arc (ref-count bump), not the underlying Strings.
+                    let arc_notif = Arc::new(notif);
                     for sub in subs.iter() {
-                        let _ = sub.tx.send(notif.clone());
+                        let _ = sub.tx.send(Arc::clone(&arc_notif));
                     }
                 }
             }

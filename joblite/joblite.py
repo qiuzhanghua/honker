@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import traceback
+from collections import deque
 from typing import Any, AsyncIterator, Callable, Optional
 
 import litenotify
@@ -12,7 +13,8 @@ class Job:
         "queue",
         "id",
         "queue_name",
-        "payload",
+        "_payload_raw",
+        "_payload",
         "state",
         "priority",
         "run_at",
@@ -24,11 +26,18 @@ class Job:
         "created_at",
     )
 
+    # Sentinel distinguishing "payload decoded to None" from "not yet decoded".
+    _UNSET = object()
+
     def __init__(self, queue: "Queue", row: dict):
         self.queue = queue
         self.id = row["id"]
         self.queue_name = row["queue"]
-        self.payload = json.loads(row["payload"]) if row["payload"] else None
+        # Lazy JSON decode: handlers that only need id/worker_id/state skip
+        # the parse entirely. Matters at claim_batch(128) where decoding
+        # 128 payloads on every batch is visible in the hot path.
+        self._payload_raw = row["payload"]
+        self._payload = Job._UNSET
         self.state = row["state"]
         self.priority = row["priority"]
         self.run_at = row["run_at"]
@@ -38,6 +47,14 @@ class Job:
         self.max_attempts = row["max_attempts"]
         self.last_error = row["last_error"]
         self.created_at = row["created_at"]
+
+    @property
+    def payload(self) -> Any:
+        if self._payload is Job._UNSET:
+            self._payload = (
+                json.loads(self._payload_raw) if self._payload_raw else None
+            )
+        return self._payload
 
     def ack(self) -> bool:
         return self.queue.ack(self.id, self.worker_id)
@@ -298,14 +315,26 @@ class Retryable(Exception):
 
 
 class Event:
-    __slots__ = ("offset", "topic", "key", "payload", "created_at")
+    __slots__ = ("offset", "topic", "key", "_payload_raw", "_payload", "created_at")
+
+    _UNSET = object()
 
     def __init__(self, row: dict):
         self.offset = row["offset"]
         self.topic = row["topic"]
         self.key = row["key"]
-        self.payload = json.loads(row["payload"]) if row["payload"] else None
+        # Lazy JSON decode; see Job.payload for rationale.
+        self._payload_raw = row["payload"]
+        self._payload = Event._UNSET
         self.created_at = row["created_at"]
+
+    @property
+    def payload(self) -> Any:
+        if self._payload is Event._UNSET:
+            self._payload = (
+                json.loads(self._payload_raw) if self._payload_raw else None
+            )
+        return self._payload
 
     def __repr__(self):
         return (
@@ -441,7 +470,9 @@ class _StreamIter:
     def __init__(self, stream: Stream, from_offset: int):
         self.stream = stream
         self.offset = from_offset
-        self._buffer: list = []
+        # `deque` for O(1) popleft; `list.pop(0)` was O(n) per yield which
+        # compounded on large replay batches (default 1000 rows per refresh).
+        self._buffer: deque = deque()
         # Subscribe to the notify channel BEFORE the first read so that events
         # published between "read empty" and "start listening" can't slip
         # through. The listener buffers all honks from this point forward; we
@@ -454,13 +485,13 @@ class _StreamIter:
     async def __anext__(self):
         while True:
             if self._buffer:
-                row = self._buffer.pop(0)
+                row = self._buffer.popleft()
                 self.offset = row["offset"]
                 return Event(row)
 
             rows = self.stream._read_since(self.offset)
             if rows:
-                self._buffer = rows
+                self._buffer.extend(rows)
                 continue
 
             try:
@@ -621,7 +652,9 @@ class _WorkerQueueIter:
         self.idle_poll_s = idle_poll_s
         self.batch_size = max(1, int(batch_size))
         self._listener = None
-        self._buffer: list = []
+        # Deque for O(1) popleft; list.pop(0) was O(n) per yield which
+        # compounded at batch_size=128 (~128x worse than batch=8 before).
+        self._buffer: deque = deque()
 
     def __aiter__(self):
         return self
@@ -629,10 +662,10 @@ class _WorkerQueueIter:
     async def __anext__(self):
         while True:
             if self._buffer:
-                return self._buffer.pop(0)
+                return self._buffer.popleft()
             batch = self.queue.claim_batch(self.worker_id, self.batch_size)
             if batch:
-                self._buffer = batch
+                self._buffer.extend(batch)
                 continue
             if self._listener is None:
                 self._listener = self.queue.db.listen(self.queue._channel())
