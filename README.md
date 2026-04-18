@@ -163,4 +163,4 @@ python bench/stream_bench.py --n 5000
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
