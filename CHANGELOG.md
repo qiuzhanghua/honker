@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## Unreleased — perf pass 1
+
+Commit-hook path is healthy. Per-tx Python path has a 4x gap to raw
+Python `sqlite3` on the same file. Started closing it.
+
+### What changed
+- **Prepared-statement cache on all SQL paths.** `run_execute` and
+  `run_query` now use `Connection::prepare_cached` instead of
+  re-preparing on every call. `BEGIN IMMEDIATE` / `COMMIT` /
+  `ROLLBACK` go through a new `run_cached_noparams` helper that also
+  hits the cache. Biggest win for batched inserts — 45k/s -> 94k/s
+  (100 jobs / tx).
+- **Bench harness fix.** `bench/stream_bench.py` now yields between
+  publishes (`await asyncio.sleep(0)`), so live e2e p50 reflects the
+  library instead of the publish-loop duration. p50 went from ~50ms
+  (harness artifact) to 0.24ms (real).
+
+### Honest numbers (median of 3, M-series, release)
+- `enqueue` single-tx: ~4.5k/s
+- `enqueue` batched (100/tx): ~94k/s
+- `claim + ack`: ~1k/s
+- `publish` single-tx: ~5.7k/s
+- replay: ~400k/s
+- live stream e2e: p50 = 0.24ms, p99 = 8ms
+
+### Known remaining gap
+Raw Python `sqlite3` is ~47k/s single-tx on the same file; we're at
+12k/s for plain `litenotify.tx + execute`. The 4x gap is the PyO3
+boundary, the writer-mutex acquire+release, and GIL detach/reacquire.
+Uncontended fast path planned — `try_acquire` on the writer mutex so
+we skip `py.detach` when the slot is immediately free. Documented in
+ROADMAP.
+
 ## Unreleased — hardening pass 2
 
 Closes the four test gaps from the previous hardening pass. Test suite:

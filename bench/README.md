@@ -1,48 +1,72 @@
 # Benchmarks
 
-Simple throughput and latency harness. Runs locally against a fresh tmp SQLite file.
-
 ```bash
 uv run python bench/joblite_bench.py --n 5000
 uv run python bench/stream_bench.py --n 5000
 ```
 
-## Baseline (Apple Silicon M-series, 2026-04)
+## Baseline — Apple Silicon M-series, release build, 2026-04
+
+Median of 3 runs. WAL + `synchronous=NORMAL`, default `busy_timeout=5000`.
 
 ### `joblite.queue`
+
 ```
-enqueue:      10,208 ops/s    (single writer, BEGIN IMMEDIATE per enqueue)
-claim+ack:       823 ops/s    (two round-trips per job: claim tx + ack tx)
-end-to-end:      763 ops/s    p50=3437ms  p99=6125ms  (batch enqueue then drain)
+enqueue (1 job / tx):        4,500 ops/s   (~230us/job)
+enqueue (100 jobs / tx):    94,000 ops/s   (~11us/job)
+claim + ack:                 1,000 ops/s   (~1ms, two write tx per job)
+end-to-end (e2e):              820 ops/s   (pathological, see below)
 ```
 
-The e2e p50/p99 here reflect a pathological "enqueue-all-then-process" pattern —
-jobs toward the end of the batch wait for the worker to reach them. Realistic
-workloads with overlapping enqueue/process show p99 ~ `1 / throughput` s.
+e2e here enqueues all N up front, then drains. Jobs at the end of the
+batch wait in line, so p50 approaches the drain time. For realistic
+interleaved workloads, per-job latency tracks `~1 / throughput s`.
 
 ### `joblite.stream`
+
 ```
-publish:       9,454 events/s
-replay:      319,417 events/s    (reader-pool SELECT of pre-seeded rows)
-live e2e:     p50=52ms  p99=108ms  (publish -> listener wake -> deliver)
+publish (1 / tx):           5,700 events/s
+replay (reader pool):     400,000 events/s
+live e2e:                  p50 = 0.24ms    p99 = 8ms    (1000 events)
 ```
 
-## Why these numbers look this way
+Live e2e is commit-hook → tokio broadcast → `call_soon_threadsafe` →
+consumer. Sub-millisecond typical.
 
-- **Enqueue ~10k/s** is the single-writer ceiling for `BEGIN IMMEDIATE` + one
-  row insert + commit on WAL-mode SQLite. Batching multiple enqueues into one
-  transaction easily clears 100k/s.
-- **Claim+ack ~800/s** is two separate write transactions per job. A batched
-  claim (one tx, many jobs) would push this into the thousands.
-- **Replay 300k+/s** is dominated by JSON decode. It's the reader pool; no
-  write lock involved.
-- **Live e2e p50 ~50ms** is the honker commit-hook → tokio broadcast →
-  `call_soon_threadsafe` → asyncio.Queue → consumer coroutine round trip.
+> A prior revision of the harness reported p50 around 50ms because the
+> publisher looped without yielding, starving the consumer coroutine.
+> Fixed; numbers above are with `await asyncio.sleep(0)` between
+> publishes. `stream_bench.py` still enforces this.
 
-## Comparing to Redis-backed queues
+## Ceilings and gaps
 
-Redis `LPUSH` / `BRPOP` on localhost typically clears ~100k ops/s but requires
-a separate process and doesn't commit atomically with the app's business
-writes. `joblite` trades peak throughput for transactional coupling and the
-operational simplicity of a single file. For most apps, the ceiling here is
-well above the actual job volume they produce.
+| Path | 1 tx/row | 100 rows/tx |
+|------|----------|-------------|
+| raw Python `sqlite3` | ~47k/s | ~640k/s |
+| litenotify tx + execute | ~12k/s | (similar to raw — fsync-bound) |
+| joblite queue enqueue | ~4.5k/s | ~94k/s |
+
+**Read the gap.** The single-writer path has three cost centers:
+
+1. **fsync on COMMIT.** Even `synchronous=NORMAL` syncs the WAL on commit.
+   At ~47k/s raw sqlite3 we're at ~21us/op, most of which is the syscall
+   plus SQLite internals. Not much room without relaxing durability.
+2. **PyO3 / mutex / GIL per tx.** litenotify sits ~4x below raw sqlite3
+   for single-tx. That's PyO3 boundary crossings, writer-mutex
+   acquire+release (uncontended but not free), `py.detach` GIL
+   release+reacquire. Fixable — [see ROADMAP](../ROADMAP.md).
+3. **joblite schema overhead.** 5 columns + one B-tree index +
+   `json.dumps` + a `tx.honk()` call per enqueue, on top of the
+   litenotify path. ~2x gap vs. plain litenotify for the same
+   single-tx pattern.
+
+Batch into one `COMMIT` and all three collapse. 94k/s for 100-row
+batches is 20x the single-tx number.
+
+## Comparing to Redis
+
+`redis-cli LPUSH` + `BRPOP` on localhost clears ~100k ops/s. It lives
+in a separate process and does not commit atomically with application
+writes. joblite trades peak single-tx throughput for that coupling.
+For most apps, 4.5k/s per-request enqueue is well above actual job
+volume. For bulk loaders, use batching.

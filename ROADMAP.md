@@ -19,6 +19,12 @@ Ship as its own branch; do not merge partial.
 - `joblite.queue.claim_batch(n)`: batched claim transaction for worker
   throughput. Bench shows single-job claim+ack tops out ~1k/s; batching
   should push to >10k/s.
+- **Single-tx enqueue perf.** Bench shows ~12k/s in `litenotify.tx`
+  vs. ~47k/s in raw Python `sqlite3` on the same file (WAL+fsync
+  floor). Roughly 4x gap. Already applied `prepare_cached` for all
+  SQL paths including `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`.
+  Next: `try_acquire` fast-path on the writer mutex for uncontended
+  workloads so we skip `py.detach` when the slot is immediately free.
 
 ## Docs
 - `docs/` site with runnable snippets per plugin.

@@ -200,8 +200,12 @@ fn run_query<'py>(
     params: Option<&Bound<'_, PyList>>,
 ) -> PyResult<Bound<'py, PyList>> {
     let values = build_params(params)?;
+    // prepare_cached hits rusqlite's per-connection statement cache. Without
+    // this, every execute re-parses the SQL and rebuilds the plan — which
+    // measures at ~4x overhead vs. the underlying SQLite ceiling for hot
+    // INSERT/UPDATE/SELECT loops. Same pattern applied in run_execute.
     let mut stmt = conn
-        .prepare(sql)
+        .prepare_cached(sql)
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut rows = stmt
@@ -239,8 +243,20 @@ fn run_execute(
     params: Option<&Bound<'_, PyList>>,
 ) -> PyResult<usize> {
     let values = build_params(params)?;
-    conn.execute(sql, rusqlite::params_from_iter(values))
+    let mut stmt = conn
+        .prepare_cached(sql)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    stmt.execute(rusqlite::params_from_iter(values))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+/// Run a fixed SQL statement with no params via the cached statement pool.
+/// Used for BEGIN IMMEDIATE / COMMIT / ROLLBACK so we don't re-parse every
+/// transaction.
+fn run_cached_noparams(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    stmt.execute([])?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -262,7 +278,7 @@ impl Drop for Transaction {
         if !state.released {
             if let Some(conn) = state.conn.take() {
                 if state.started {
-                    let _ = conn.execute_batch("ROLLBACK;");
+                    let _ = run_cached_noparams(&conn, "ROLLBACK");
                 }
                 self.writer.release(conn);
             }
@@ -276,7 +292,7 @@ impl Transaction {
     fn __enter__<'a>(slf: PyRef<'a, Self>, py: Python<'a>) -> PyResult<PyRef<'a, Self>> {
         let writer = slf.writer.clone();
         let conn = py.detach(|| writer.acquire());
-        match conn.execute_batch("BEGIN IMMEDIATE;") {
+        match run_cached_noparams(&conn, "BEGIN IMMEDIATE") {
             Ok(()) => {
                 {
                     let mut state = slf.inner.lock();
@@ -310,12 +326,12 @@ impl Transaction {
         state.started = false;
         let err = if was_started {
             if raised {
-                conn.execute_batch("ROLLBACK;").err()
+                run_cached_noparams(&conn, "ROLLBACK").err()
             } else {
-                match conn.execute_batch("COMMIT;") {
+                match run_cached_noparams(&conn, "COMMIT") {
                     Ok(()) => None,
                     Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK;");
+                        let _ = run_cached_noparams(&conn, "ROLLBACK");
                         Some(e)
                     }
                 }

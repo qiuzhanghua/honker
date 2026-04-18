@@ -58,8 +58,13 @@ async def main():
 
     task = asyncio.create_task(consume())
     await asyncio.sleep(0.1)
+    # Yield between publishes so the consumer can interleave.
+    # Without this, publishes hog the event loop and p50 ends up being
+    # approximately half the publish-loop duration (a harness artifact,
+    # not a library latency).
     for i in range(target):
         db.stream("live").publish({"i": i, "t": time.perf_counter()})
+        await asyncio.sleep(0)
     try:
         await asyncio.wait_for(done.wait(), timeout=30.0)
     finally:
