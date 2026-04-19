@@ -5,6 +5,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Node
+node_modules/
+*.node
+package-lock.json
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

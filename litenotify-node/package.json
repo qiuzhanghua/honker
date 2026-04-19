@@ -1,0 +1,37 @@
+{
+  "name": "@litenotify/node",
+  "version": "0.1.0",
+  "description": "Node binding for litenotify — cross-process SQLite NOTIFY/LISTEN, 0.5ms wake latency.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "napi": {
+    "binaryName": "litenotify",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/russellromney/litenotify-joblite"
+  }
+}

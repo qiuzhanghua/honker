@@ -2,5 +2,6 @@
 members = [
     "litenotify",
     "litenotify-extension",
+    "litenotify-node",
 ]
 resolver = "2"
