@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## Unreleased — task queue feature additions (huey parity, minus pipelines)
+
+Six roadmap items landed in two batches. Decorators live on framework
+plugins, not on joblite core; the shared `joblite._worker.run_task`
+helper centralizes the worker-side enforcement (timeout, retries,
+backoff, Retryable) so all features share one implementation.
+
+### Batch 1: decorator surface additions
+
+- **Handler timeout.** Wall-clock bound on handler execution via
+  `asyncio.wait_for`. Closes the reclaim-while-still-running
+  correctness hole: previously a hung handler's claim would expire
+  after `visibility_timeout_s` and another worker would start a
+  second copy while the first was still executing side effects.
+- **Declarative retries.** `@task(retries=3, retry_delay=60,
+  backoff=2.0)` replaces the ad-hoc `try/except: job.retry(60)` each
+  plugin had. Exponential backoff: delay for attempt N =
+  `retry_delay * backoff**(N-1)`. `Retryable` exceptions honor the
+  caller's own `delay_s`, bypassing the formula.
+- **`delay=` kwarg on `enqueue`.** Sugar for
+  `run_at=time.time() + delay`.
+
+### Batch 2: schema-adding features
+
+- **Task expiration.** `Queue.enqueue(expires=60)` sets an
+  `expires_at` column on `_joblite_live`. Claim path filters expired
+  rows (extension `jl_claim_batch` too). `queue.sweep_expired()`
+  moves them into `_joblite_dead` with `last_error='expired'`.
+- **Named advisory locks.** `with db.lock(name, ttl=60): ...` via a
+  new `_joblite_locks` table. Raises `joblite.LockHeld` if another
+  holder has it; TTL bounds how long a crashed holder can block
+  others. Primary use case: cron tasks that shouldn't overlap.
+- **Rate-limiting.** `db.try_rate_limit(name, limit, per) -> bool`
+  via a new `_joblite_rate_limits` table. Fixed-window counter;
+  rejected calls don't inflate the count (hot-loop safe).
+  `db.sweep_rate_limits()` reclaims stale windows.
+
+### Restructure
+
+- All language / framework packages moved into `packages/` — each
+  subdirectory is self-contained (own `Cargo.toml` /
+  `pyproject.toml` / `package.json`) and ready to be split into its
+  own GitHub repo + re-added as a git submodule when we're ready to
+  authenticate and do the migration.
+
+### Cross-cutting test + infra fixes
+
+- Fixed two parallel-only test flakes (wake-latency p99 using max,
+  Django worker SIGINT timeout). Both now pass under `-n auto`.
+- `conftest.py` inserts `packages/` into `sys.path` so the pure-
+  Python packages are importable from tests without per-package
+  `pip install -e`.
+
 ## Unreleased — cut framework plugins
 
 Dropped `packages/joblite_fastapi`, `packages/joblite_django`, and

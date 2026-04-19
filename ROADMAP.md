@@ -86,35 +86,20 @@ To do (requires authenticated repo creation on GitHub):
 
 ### Task queue features (huey parity, minus pipelines)
 
-Ordered by value / effort. The "value" column is my best guess at
-how often the feature actually matters in real workloads.
+Completed items (handler timeout, declarative retries, `delay=` kwarg,
+task expiration, named locks, rate-limiting) are in the CHANGELOG.
+Remaining:
 
-- [x] **Handler timeout.** `@task(timeout=N)` wraps handler calls in
-  `asyncio.wait_for` via the shared `joblite._worker.run_task` helper.
-  Closed the reclaim-while-still-running correctness hole.
-- [x] **`delay=` kwarg on `enqueue`.** `Queue.enqueue(..., delay=60)`
-  sugar for `run_at=time.time() + 60`.
-- [x] **Declarative retries.** `@task(retries=3, retry_delay=60,
-  backoff=2.0)` in plugin decorators. Worker catches exceptions and
-  applies the exponential-backoff formula via `run_task`. Retryable
-  exceptions honor the caller's own `delay_s`.
-- [x] **Task expiration.** `Queue.enqueue(expires=60)` sets
-  `expires_at`. Claim path filters expired rows.
-  `queue.sweep_expired()` moves them to `_joblite_dead`.
-- [x] **Task locking.** `with db.lock(name, ttl=60): ...` via a new
-  `_joblite_locks` table. Raises `joblite.LockHeld` if the lock is
-  held. TTL bounds how long a crashed holder can block others.
-- [x] **Rate-limiting.** `db.try_rate_limit(name, limit, per)`
-  returns True/False. Fixed-window counter in `_joblite_rate_limits`.
-  `db.sweep_rate_limits()` reclaims stale windows.
-- [ ] **Crontab / periodic tasks.** `@periodic_task(crontab(minute='0',
-  hour='3'))`. A scheduler process (dedicated CLI or in-process
-  background task) enqueues periodic tasks at their cron boundaries.
-  Needs: a crontab parser (either vendor from croniter or a minimal
-  built-in), a scheduler loop that wakes at the next boundary and
-  calls `enqueue`, and a way to avoid double-firing across multiple
-  scheduler processes (simplest: leader election via
-  `db.lock('scheduler', ttl=N)` — which we now have). ~4 hours.
+- [ ] **Crontab / periodic tasks.** `Scheduler.add(name, queue,
+  schedule=crontab('0 3 * * *'))`. A scheduler process (dedicated CLI
+  or in-process background task) enqueues periodic tasks at their
+  cron boundaries; regular workers run them. Needs a crontab parser
+  (minimal vendored), a scheduler loop that wakes at the next
+  boundary and calls `enqueue`, and leader election via
+  `db.lock('joblite-scheduler', ttl=N)` — which we already have —
+  plus lock-heartbeat-during-long-sleep. Persist `last_fire_at` per
+  task in a new `_joblite_scheduler_state` table so scheduler
+  restart doesn't double-fire. ~4 hours.
 - [ ] **Task result storage.** `job.result(timeout=...)` returns the
   handler's return value. New `_joblite_results(id, value, expires_at)`
   table, worker UPSERTs on success, caller polls (or awaits a WAL
