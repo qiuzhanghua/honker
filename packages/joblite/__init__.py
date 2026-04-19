@@ -11,8 +11,14 @@ from joblite.joblite import (
     Stream,
     open,
 )
+from joblite._scheduler import (
+    CronSchedule,
+    Scheduler,
+    crontab,
+)
 
 __all__ = [
+    "CronSchedule",
     "Database",
     "Event",
     "Job",
@@ -22,6 +28,8 @@ __all__ = [
     "Outbox",
     "Queue",
     "Retryable",
+    "Scheduler",
     "Stream",
+    "crontab",
     "open",
 ]

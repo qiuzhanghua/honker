@@ -196,6 +196,10 @@ pub const BOOTSTRAP_JOBLITE_SQL: &str = "
       count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (name, window_start)
     );
+    CREATE TABLE IF NOT EXISTS _joblite_scheduler_state (
+      name TEXT PRIMARY KEY,
+      last_fire_at INTEGER NOT NULL
+    );
 ";
 
 /// Install the joblite queue schema on `conn`. Idempotent. See
@@ -689,5 +693,16 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(rl_cols, vec!["name", "window_start", "count"]);
+
+        // _joblite_scheduler_state table present for Scheduler's
+        // per-task last-fire-time persistence.
+        let sched_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('_joblite_scheduler_state')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(sched_cols, vec!["name", "last_fire_at"]);
     }
 }

@@ -87,19 +87,9 @@ To do (requires authenticated repo creation on GitHub):
 ### Task queue features (huey parity, minus pipelines)
 
 Completed items (handler timeout, declarative retries, `delay=` kwarg,
-task expiration, named locks, rate-limiting) are in the CHANGELOG.
-Remaining:
+task expiration, named locks, rate-limiting, crontab / periodic
+tasks) are in the CHANGELOG. Remaining:
 
-- [ ] **Crontab / periodic tasks.** `Scheduler.add(name, queue,
-  schedule=crontab('0 3 * * *'))`. A scheduler process (dedicated CLI
-  or in-process background task) enqueues periodic tasks at their
-  cron boundaries; regular workers run them. Needs a crontab parser
-  (minimal vendored), a scheduler loop that wakes at the next
-  boundary and calls `enqueue`, and leader election via
-  `db.lock('joblite-scheduler', ttl=N)` — which we already have —
-  plus lock-heartbeat-during-long-sleep. Persist `last_fire_at` per
-  task in a new `_joblite_scheduler_state` table so scheduler
-  restart doesn't double-fire. ~4 hours.
 - [ ] **Task result storage.** `job.result(timeout=...)` returns the
   handler's return value. New `_joblite_results(id, value, expires_at)`
   table, worker UPSERTs on success, caller polls (or awaits a WAL

@@ -44,13 +44,13 @@ Today:
 - Single-digit millisecond cross-process reaction time, no polling
 - Handler timeouts, declarative retries with exponential backoff
 - Delayed jobs, task expiration, named locks, rate-limiting
+- Crontab-style periodic tasks with a leader-elected scheduler
 - Durable streams with per-consumer offsets and configurable flush interval
 - SQLite loadable extension so any SQLite client can read the same tables
 - Python and Node.js bindings
 
 Planned:
 
-- Crontab / periodic tasks
 - Task result storage
 - Go and Ruby bindings
 - Framework plugins (FastAPI, Django, Flask, Express, Rails) — cut

@@ -1,5 +1,81 @@
 # CHANGELOG
 
+## Unreleased — crontab / periodic tasks
+
+Adds `joblite.Scheduler` + `joblite.crontab(expr)` for cron-style
+periodic tasks. The scheduler enqueues into a named queue on each
+cron boundary; regular workers claim and run the jobs.
+
+    import asyncio
+    import joblite
+    from joblite import Scheduler, crontab
+
+    db = joblite.open("app.db")
+    scheduler = Scheduler(db)
+    scheduler.add(
+        name="nightly-backup",
+        queue="backups",
+        schedule=crontab("0 3 * * *"),
+        payload={"target": "s3"},
+        expires=3600,
+    )
+    asyncio.run(scheduler.run())
+
+### Design
+
+- **Cron parser is vendored** — a ~100-line 5-field parser (`minute
+  hour dom month dow`, with `*`, `*/N`, `N-M`, `N,M,P` syntax). No
+  new Python dependencies.
+- **Leader election via `db.lock('joblite-scheduler', ttl=60)`.** Two
+  scheduler processes can't both fire; the second raises
+  `joblite.LockHeld` and callers are expected to retry in a loop
+  for hot-standby semantics. Lock is heartbeat-refreshed every 30 s
+  during long sleeps so TTL doesn't elapse between fires.
+- **Persistence via `_joblite_scheduler_state`** — per-task
+  `last_fire_at` so scheduler restart doesn't double-fire a
+  boundary that was already dispatched.
+- **Missed fires catch up** — if the scheduler was down for 4 hours
+  with an hourly schedule, the first iteration after restart fires
+  all 4 missed boundaries (with `expires=` in play if the caller
+  wants to drop stale ones).
+- **Fires = enqueue, not run.** The scheduler never runs handlers.
+  Regular workers (spawned however the user wants) consume the
+  enqueued jobs like any other job.
+- **Scheduler with no registered tasks is a no-op** — doesn't
+  acquire the lock, returns immediately. A misconfigured scheduler
+  process can't accidentally block real schedulers from running.
+
+### Changes
+
+litenotify-core::BOOTSTRAP_JOBLITE_SQL
+  - Add `_joblite_scheduler_state(name PRIMARY KEY, last_fire_at)`
+    table.
+
+packages/joblite/_scheduler.py — new module.
+  - `_parse_field(field, lo, hi) -> frozenset[int]`.
+  - `CronSchedule` with `matches(dt)`, `next_after(dt)`.
+  - `crontab(expr) -> CronSchedule`.
+  - `Scheduler(db)` with `.add(name, queue, schedule, payload,
+    priority, expires)` and `.run(stop_event=None)`.
+  - `_fire_due(now, next_fires, last_fires)` as a pure function —
+    unit-testable without waiting for real cron boundaries.
+
+packages/joblite/__init__.py
+  - Export `Scheduler`, `CronSchedule`, `crontab`.
+
+tests/test_scheduler.py — 26 tests pinning:
+  - _parse_field edge cases (any / single / range / step / list /
+    combinations / errors for out-of-range and inverted ranges)
+  - crontab() field count validation
+  - matches() for minute/hour/daily/dow
+  - next_after() for hourly / exactly-at-boundary / crosses-day /
+    crosses-year
+  - Scheduler.add() registration and replace-by-name
+  - _fire_due enqueues on boundary, skips already-fired,
+    catches up multiple missed boundaries
+  - Scheduler.run() integration: stop_event, lock held + release,
+    noop-without-tasks, two schedulers → one raises LockHeld
+
 ## Unreleased — task queue feature additions (huey parity, minus pipelines)
 
 Six roadmap items landed in two batches. Decorators live on framework
