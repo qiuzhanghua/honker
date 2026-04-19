@@ -402,18 +402,13 @@ def test_management_command_two_workers_split_work_exclusively(tmp_path):
         for i in range(n):
             q.enqueue({"i": i})
 
-        # Wait until pending+processing reach 0 AND both workers have
-        # processed >=1. ack DELETEs from processing so "drained" means
-        # no rows remain in either table.
+        # Wait until _joblite_live is empty for this queue AND both
+        # workers have processed >=1. ack DELETEs the row so "drained"
+        # means no rows remain in live (pending or processing).
         deadline = _time.time() + 30.0
         while _time.time() < deadline:
             remaining = db.query(
-                """
-                SELECT
-                  (SELECT COUNT(*) FROM _joblite_pending WHERE queue='shared')
-                  + (SELECT COUNT(*) FROM _joblite_processing WHERE queue='shared')
-                  AS c
-                """
+                "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='shared'"
             )[0]["c"]
             if remaining == 0 and seen_any_1.is_set() and seen_any_2.is_set():
                 break

@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## Unreleased — schema: single-table hybrid (supersedes tables-per-state)
+
+Reverted the tables-per-state split (`_joblite_pending` / `_joblite_processing`
+/ `_joblite_dead`) in favor of a single-table hybrid:
+
+- `_joblite_live` — pending + processing rows, with `state` column.
+- `_joblite_dead` — terminal rows, separate so retention/truncation
+  doesn't touch the hot path.
+- `_joblite_live_claim` — partial index
+  `(queue, priority DESC, run_at, id) WHERE state IN ('pending', 'processing')`.
+- `_joblite_jobs` view — UNIONs live + dead for inspection.
+
+### Why revert
+
+Tables-per-state was 25% slower on direct `claim_one+ack` because
+every claim was DELETE+INSERT (2 writes) instead of a single UPDATE.
+The partial index on the single-table design already keeps dead rows
+out of the claim hot path — none of the "scale flat with history"
+property was actually unique to tables-per-state once I measured it
+honestly. And the fresh-DB benchmark isn't realistic anyway (no
+contention, everything in page cache). Stopped chasing that pattern
+and aligned with what the extension already uses.
+
+### Operation mapping (single-table hybrid)
+
+| Op | SQL |
+|----|-----|
+| enqueue | INSERT INTO _joblite_live (state='pending') |
+| claim | UPDATE state='processing' on partial index (1 write) |
+| ack | DELETE FROM _joblite_live |
+| retry (not exhausted) | UPDATE state='pending', bump run_at (stays in partial index) |
+| retry exhausted / fail | DELETE + INSERT INTO _joblite_dead |
+| heartbeat | UPDATE claim_expires_at |
+
+### Numbers (fresh DB, median of 3)
+
+| Op | Tables-per-state (prev) | Single-table hybrid |
+|----|-------------------------|----------------------|
+| claim+ack (direct) | 3.4k/s | 3.9k/s |
+| claim_batch+ack_batch (128) | 100k/s | ~110k/s |
+| async iter e2e | 7.5k/s | ~5-6k/s (noisy) |
+
+Numbers are close; the real perf test (concurrent workers + DB bigger
+than page cache) is still TODO — see ROADMAP.
+
+All 12 Rust + 109 Python tests still pass.
+
 ## Unreleased — perf pass 5: tables-per-state schema
 
 The big structural change. `_joblite_jobs` is gone. In its place:

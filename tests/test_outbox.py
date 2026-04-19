@@ -63,7 +63,7 @@ async def test_outbox_retries_on_exception(db_path):
             # on the pending table (that's where retried jobs land).
             with db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_pending SET run_at=unixepoch() - 1 WHERE queue=?",
+                    "UPDATE _joblite_live SET run_at=unixepoch() - 1 WHERE queue=?",
                     ["_outbox:w"],
                 )
     finally:
@@ -170,10 +170,10 @@ async def test_outbox_eventually_dies_after_max_attempts(db_path):
             if state and state[0]["state"] == "dead":
                 break
             await asyncio.sleep(0.02)
-            # Retried jobs live in _joblite_pending until claimed again.
+            # Retried jobs live in _joblite_live until claimed again.
             with db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_pending SET run_at=unixepoch() - 1 WHERE queue=?",
+                    "UPDATE _joblite_live SET run_at=unixepoch() - 1 WHERE queue=?",
                     ["_outbox:w"],
                 )
     finally:

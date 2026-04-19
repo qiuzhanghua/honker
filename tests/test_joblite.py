@@ -70,7 +70,7 @@ def test_expired_claim_cannot_ack_and_is_reclaimable(db_path):
     # Simulate claim expiry by advancing claim_expires_at into the past.
     with db.transaction() as tx:
         tx.execute(
-            "UPDATE _joblite_processing SET claim_expires_at = unixepoch() - 1 WHERE id=?",
+            "UPDATE _joblite_live SET claim_expires_at = unixepoch() - 1 WHERE id=?",
             [job.id],
         )
 
@@ -192,10 +192,10 @@ def test_delayed_run_at_not_claimed_until_due(db_path):
     assert q.claim_one("w") is None
 
     # Rewrite run_at to the past via direct SQL to avoid real sleep.
-    # The pending job lives in _joblite_pending; UPDATE there.
+    # The pending job lives in _joblite_live; UPDATE there.
     with db.transaction() as tx:
         tx.execute(
-            "UPDATE _joblite_pending SET run_at=unixepoch() - 1 WHERE payload=?",
+            "UPDATE _joblite_live SET run_at=unixepoch() - 1 WHERE payload=?",
             ['{"n": 1}'],
         )
     j = q.claim_one("w")
@@ -213,9 +213,9 @@ def test_max_attempts_transitions_to_dead(db_path):
     assert j1.retry(delay_s=0, error="try1") is True
 
     # Rewrite run_at so it's immediately claimable again.
-    # After retry the row is back in _joblite_pending.
+    # After retry the row is back in _joblite_live.
     with db.transaction() as tx:
-        tx.execute("UPDATE _joblite_pending SET run_at=unixepoch() - 1")
+        tx.execute("UPDATE _joblite_live SET run_at=unixepoch() - 1")
 
     j2 = q.claim_one("w")
     assert j2.attempts == 2
