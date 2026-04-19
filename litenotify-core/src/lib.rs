@@ -32,6 +32,10 @@
 //! entry-point symbols, row-materialization into Python dicts or JS
 //! objects — stays in the respective binding crate.
 
+mod joblite_ops;
+
+pub use joblite_ops::attach_joblite_functions;
+
 use parking_lot::{Condvar, Mutex};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OpenFlags};

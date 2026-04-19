@@ -156,6 +156,12 @@ impl Database {
         // Writer conn registers the notify() SQL function + ensures
         // _litenotify_notifications exists. Readers just SELECT.
         let writer_conn = open_conn(&path, true).map_err(core_err)?;
+        // Also register every `jl_*` SQL function on the writer
+        // connection so Python can call `SELECT jl_foo(...)` inside
+        // its own transactions — same implementations the loadable
+        // extension registers, no `.dylib` load needed at runtime.
+        litenotify_core::attach_joblite_functions(&writer_conn)
+            .map_err(core_err)?;
         let wal_path: std::path::PathBuf = format!("{}-wal", path).into();
         Ok(Self {
             writer: Arc::new(Writer::new(writer_conn)),

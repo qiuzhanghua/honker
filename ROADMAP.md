@@ -93,6 +93,54 @@ Pipelines / chains / groups / chords remain **out of scope for v1**
 — the build-it-yourself pattern (task A enqueues task B on success)
 is good enough and avoids the complexity.
 
+### Maximize Rust / minimize per-language code (in flight)
+
+Thesis: every new language binding (Go, Ruby, TypeScript joblite-node)
+would otherwise re-implement the same SQL + cron parsing + scheduler
+logic. The less code that lives in the language wrapper, the easier
+each new binding is. Six-commit refactor:
+
+- [ ] **1. Move Rust helpers from `litenotify-extension/src/lib.rs`
+  to `litenotify-core::joblite_ops`.** Add
+  `attach_joblite_functions(conn)`. Extension collapses to
+  `attach_notify + attach_joblite_functions`. PyO3 `Database.new()`
+  also calls `attach_joblite_functions` so Python can use
+  `SELECT jl_*(...)` without loading the `.dylib`.
+- [ ] **2. Fill the gap.** Add `jl_enqueue`, `jl_retry`, `jl_fail`,
+  `jl_heartbeat`, `jl_ack` (the singular, not just `jl_ack_batch`).
+  These are currently Python-only; every other binding would have to
+  reinvent them. Enqueue param coercion (delay / run_at / expires)
+  lives in Rust.
+- [ ] **3. Python inline SQL → `SELECT jl_*()`.** Replace every inline
+  SQL string in `joblite.py` (roughly `Queue.ack`, `Queue.retry`,
+  `Queue.fail`, `Queue.heartbeat`, `Queue.claim_batch`,
+  `Queue.ack_batch`, `Queue.sweep_expired`, `Database.lock`,
+  `Database.try_rate_limit`, `Database.sweep_rate_limits`,
+  `Scheduler._record_fire`, `Queue.save_result`, `Queue.get_result`,
+  `Queue.sweep_results`) with calls to the corresponding `jl_*`
+  function. ~200 LOC reduction.
+- [ ] **4. Cron parser to Rust.** `jl_cron_next_after(expr, from_unix)
+  -> unix_ts`. Python's `CronSchedule` class collapses to a marker
+  holding the expression string; `next_after()` is one SQL call. 100
+  lines of Python parsing deleted.
+- [ ] **5. Scheduler state + fire-due to Rust.** New SQL functions
+  `jl_scheduler_register(name, queue, cron_expr, payload, priority,
+  expires)` and `jl_scheduler_tick() -> JSON of due fires`. Python
+  `Scheduler.run()` collapses to ~40 lines of asyncio glue around
+  lock + tick + enqueue + sleep + heartbeat. Tasks stored in DB,
+  not in a Python dict.
+- [ ] **6. Stream ops to Rust.** `jl_stream_publish`,
+  `jl_stream_read_since`, `jl_stream_save_offset`,
+  `jl_stream_get_offset`. `_StreamIter` becomes a thin iterator
+  around `SELECT jl_stream_read_since(...)`. Auto-save threshold
+  logic stays in Python (language-specific async control flow) but
+  delegates all SQL to core.
+
+After the six: per-language wrapper is ~300 LOC of context-manager /
+iterator / timer glue + payload wrapping. Anything SQL-shaped lives
+in `litenotify-core`. New bindings inherit the feature set by
+loading the extension + writing that glue.
+
 ### Bindings
 
 - [ ] **Refactor `litenotify` loadable extension toward a pure
