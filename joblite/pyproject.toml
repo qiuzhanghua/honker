@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joblite"
+version = "0.1.0"
+description = "Durable queue, stream, and cross-process pub/sub for SQLite. Built on litenotify."
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Russell Romney" }]
+keywords = ["sqlite", "queue", "pubsub", "stream", "outbox", "notify", "listen"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Database",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+  "litenotify>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/russellromney/litenotify-joblite"
+Repository = "https://github.com/russellromney/litenotify-joblite"
+
+[tool.setuptools]
+packages = ["joblite"]
+package-dir = { "joblite" = "." }

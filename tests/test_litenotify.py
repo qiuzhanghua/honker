@@ -282,8 +282,12 @@ def test_connection_returned_after_commit_error(db_path):
     assert rows[0]["c"] == 6
 
 
-async def test_slow_listener_does_not_block_commit_hook(db_path):
-    """A listener that falls behind must not stall subsequent commits."""
+async def test_slow_listener_does_not_block_writer(db_path):
+    """A listener that falls behind must not stall subsequent commits.
+    Was originally a commit-hook test; now there's no commit hook, but
+    the invariant is still load-bearing: a dormant listener must not
+    affect the writer path at all.
+    """
     db = litenotify.open(db_path)
     _make_table(db)
 
