@@ -2,14 +2,13 @@
 
 import asyncio
 import signal
-import traceback
 import uuid
 
 from django.core.management.base import BaseCommand
 
 import joblite
+import joblite._worker
 import joblite_django
-from joblite import Retryable
 
 
 class Command(BaseCommand):
@@ -52,7 +51,7 @@ class Command(BaseCommand):
                 )
                 workers.append(
                     asyncio.create_task(
-                        _worker_loop(queue, info["func"], worker_id)
+                        _worker_loop(queue, info, worker_id)
                     )
                 )
 
@@ -74,21 +73,16 @@ class Command(BaseCommand):
         await asyncio.gather(*workers, return_exceptions=True)
 
 
-async def _worker_loop(queue, func, worker_id):
+async def _worker_loop(queue, info: dict, worker_id: str):
     try:
         async for job in queue.claim(worker_id):
-            try:
-                if asyncio.iscoroutinefunction(func):
-                    await func(job.payload)
-                else:
-                    func(job.payload)
-                job.ack()
-            except Retryable as r:
-                job.retry(delay_s=r.delay_s, error=str(r))
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                err = f"{e}\n{traceback.format_exc()}"
-                job.retry(delay_s=60, error=err)
+            await joblite._worker.run_task(
+                job,
+                info["func"],
+                timeout=info.get("timeout"),
+                retries=info.get("retries"),
+                retry_delay=info.get("retry_delay", 60.0),
+                backoff=info.get("backoff", 1.0),
+            )
     except asyncio.CancelledError:
         raise

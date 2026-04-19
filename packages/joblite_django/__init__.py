@@ -81,9 +81,21 @@ def task(
     concurrency: int = 1,
     visibility_timeout_s: int = 300,
     max_attempts: int = 3,
+    timeout: Optional[float] = None,
+    retries: Optional[int] = None,
+    retry_delay: float = 60.0,
+    backoff: float = 1.0,
 ):
     """Register a handler for a named queue. The worker command discovers
-    registered tasks and runs them."""
+    registered tasks and runs them.
+
+    Decorator knobs:
+      - `concurrency`: worker tasks pulling from this queue.
+      - `visibility_timeout_s` / `max_attempts`: Queue defaults.
+      - `timeout`: wall-clock seconds per handler invocation.
+      - `retries`: max attempts before moving the job to dead.
+      - `retry_delay` + `backoff`: exponential backoff formula.
+    """
 
     def decorator(func: Callable) -> Callable:
         _tasks[queue_name] = {
@@ -91,6 +103,10 @@ def task(
             "concurrency": concurrency,
             "visibility_timeout_s": visibility_timeout_s,
             "max_attempts": max_attempts,
+            "timeout": timeout,
+            "retries": retries,
+            "retry_delay": retry_delay,
+            "backoff": backoff,
         }
         return func
 

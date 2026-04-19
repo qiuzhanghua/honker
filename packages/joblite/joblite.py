@@ -223,6 +223,7 @@ class Queue:
         payload: Any,
         tx=None,
         run_at: Optional[int] = None,
+        delay: Optional[float] = None,
         priority: int = 0,
     ) -> None:
         """Insert one job row. When called without `tx=`, opens its
@@ -236,8 +237,19 @@ class Queue:
                 for p in payloads:
                     q.enqueue(p, tx=tx)
                 # single commit + one wake for all workers
+
+        Scheduling:
+          - `run_at`: absolute unix epoch when the job becomes claimable.
+          - `delay`:  seconds from now. Shorthand for
+                      `run_at = time.time() + delay`. If both are
+                      passed, `delay` wins.
         """
-        run_at_val = int(run_at) if run_at is not None else int(time.time())
+        if delay is not None:
+            run_at_val = int(time.time() + float(delay))
+        elif run_at is not None:
+            run_at_val = int(run_at)
+        else:
+            run_at_val = int(time.time())
         payload_str = json.dumps(payload)
         params = [self.name, payload_str, run_at_val, int(priority), self.max_attempts]
 
@@ -760,8 +772,17 @@ class Outbox:
     def queue(self) -> Queue:
         return self._queue
 
-    def enqueue(self, payload: Any, tx=None, priority: int = 0) -> None:
-        self._queue.enqueue(payload, tx=tx, priority=priority)
+    def enqueue(
+        self,
+        payload: Any,
+        tx=None,
+        priority: int = 0,
+        delay: Optional[float] = None,
+        run_at: Optional[int] = None,
+    ) -> None:
+        self._queue.enqueue(
+            payload, tx=tx, priority=priority, delay=delay, run_at=run_at
+        )
 
     async def run_worker(self, worker_id: str):
         """Drive delivery forever. Cancel the task to stop."""

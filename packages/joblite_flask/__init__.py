@@ -32,7 +32,6 @@ import asyncio
 import json
 import queue as _queue
 import threading
-import traceback
 import uuid
 import weakref
 from typing import Any, AsyncIterator, Callable, Dict, Optional
@@ -41,6 +40,7 @@ from flask import Response, abort, current_app, request
 import click
 
 import joblite
+import joblite._worker
 from joblite import Retryable
 
 
@@ -249,8 +249,20 @@ class JobliteFlask:
         concurrency: int = 1,
         visibility_timeout_s: int = 300,
         max_attempts: int = 3,
+        timeout: Optional[float] = None,
+        retries: Optional[int] = None,
+        retry_delay: float = 60.0,
+        backoff: float = 1.0,
     ):
-        """Register a handler for a queue. The CLI worker picks it up."""
+        """Register a handler for a queue. The CLI worker picks it up.
+
+        Decorator knobs:
+          - `concurrency`: worker tasks pulling from this queue.
+          - `visibility_timeout_s` / `max_attempts`: Queue defaults.
+          - `timeout`: wall-clock seconds per handler invocation.
+          - `retries`: max attempts before the job moves to dead.
+          - `retry_delay` + `backoff`: exponential backoff formula.
+        """
 
         def decorator(func: Callable) -> Callable:
             q = self.db.queue(
@@ -262,6 +274,10 @@ class JobliteFlask:
                 "func": func,
                 "queue": q,
                 "concurrency": concurrency,
+                "timeout": timeout,
+                "retries": retries,
+                "retry_delay": retry_delay,
+                "backoff": backoff,
             }
             return func
 
@@ -283,9 +299,7 @@ class JobliteFlask:
                     "flask", self._instance_id, name, i
                 )
                 workers.append(
-                    asyncio.create_task(
-                        _run_worker(info["queue"], info["func"], worker_id)
-                    )
+                    asyncio.create_task(_run_worker(info, worker_id))
                 )
         try:
             await asyncio.gather(*workers)
@@ -391,22 +405,18 @@ class JobliteFlask:
         )
 
 
-async def _run_worker(queue: joblite.Queue, func: Callable, worker_id: str):
+async def _run_worker(info: dict, worker_id: str):
+    queue = info["queue"]
     try:
         async for job in queue.claim(worker_id):
-            try:
-                if asyncio.iscoroutinefunction(func):
-                    await func(job.payload)
-                else:
-                    func(job.payload)
-                job.ack()
-            except Retryable as r:
-                job.retry(delay_s=r.delay_s, error=str(r))
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                err = f"{e}\n{traceback.format_exc()}"
-                job.retry(delay_s=60, error=err)
+            await joblite._worker.run_task(
+                job,
+                info["func"],
+                timeout=info.get("timeout"),
+                retries=info.get("retries"),
+                retry_delay=info.get("retry_delay", 60.0),
+                backoff=info.get("backoff", 1.0),
+            )
     except asyncio.CancelledError:
         raise
 

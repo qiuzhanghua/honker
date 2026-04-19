@@ -1,6 +1,5 @@
 import asyncio
 import json
-import traceback
 import uuid
 from typing import Any, Callable, Optional
 
@@ -8,6 +7,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import joblite
+import joblite._worker
 from joblite import Retryable  # re-export for backward-compatible import path
 
 
@@ -50,7 +50,23 @@ class JobliteApp:
         concurrency: int = 1,
         visibility_timeout_s: int = 300,
         max_attempts: int = 3,
+        timeout: Optional[float] = None,
+        retries: Optional[int] = None,
+        retry_delay: float = 60.0,
+        backoff: float = 1.0,
     ):
+        """Register `func` as the handler for `queue_name`.
+
+        Decorator knobs:
+          - `concurrency`: how many worker tasks pull from this queue.
+          - `visibility_timeout_s` / `max_attempts`: Queue defaults.
+          - `timeout`: wall-clock seconds per handler invocation.
+                        Raises asyncio.TimeoutError and retries.
+          - `retries`: max attempts before the job moves to dead.
+                        None = no limit beyond Queue.max_attempts.
+          - `retry_delay` + `backoff`: exponential backoff formula.
+                        Delay for attempt N = retry_delay * backoff**(N-1).
+        """
         def decorator(func: Callable):
             q = self.db.queue(
                 queue_name,
@@ -61,6 +77,10 @@ class JobliteApp:
                 "func": func,
                 "queue": q,
                 "concurrency": concurrency,
+                "timeout": timeout,
+                "retries": retries,
+                "retry_delay": retry_delay,
+                "backoff": backoff,
             }
             return func
 
@@ -73,7 +93,7 @@ class JobliteApp:
                     "fastapi", self._instance_id, queue_name, i
                 )
                 t = asyncio.create_task(
-                    self._worker_loop(info["queue"], info["func"], worker_id)
+                    self._worker_loop(info, worker_id)
                 )
                 self._worker_tasks.append(t)
 
@@ -84,24 +104,18 @@ class JobliteApp:
             await asyncio.gather(*self._worker_tasks, return_exceptions=True)
         self._worker_tasks = []
 
-    async def _worker_loop(
-        self, queue: joblite.Queue, func: Callable, worker_id: str
-    ):
+    async def _worker_loop(self, info: dict, worker_id: str):
+        queue = info["queue"]
         try:
             async for job in queue.claim(worker_id):
-                try:
-                    if asyncio.iscoroutinefunction(func):
-                        await func(job.payload)
-                    else:
-                        func(job.payload)
-                    job.ack()
-                except Retryable as r:
-                    job.retry(delay_s=r.delay_s, error=str(r))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    err = f"{e}\n{traceback.format_exc()}"
-                    job.retry(delay_s=60, error=err)
+                await joblite._worker.run_task(
+                    job,
+                    info["func"],
+                    timeout=info.get("timeout"),
+                    retries=info.get("retries"),
+                    retry_delay=info.get("retry_delay", 60.0),
+                    backoff=info.get("backoff", 1.0),
+                )
         except asyncio.CancelledError:
             raise
 
