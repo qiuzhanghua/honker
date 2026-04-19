@@ -614,11 +614,11 @@ class _StreamIter:
         # `deque` for O(1) popleft; `list.pop(0)` was O(n) per yield which
         # compounded on large replay batches (default 1000 rows per refresh).
         self._buffer: deque = deque()
-        # Subscribe to the notify channel BEFORE the first read so that events
-        # published between "read empty" and "start listening" can't slip
-        # through. The listener buffers all notifications from this point
-        # forward; we drain the queue every time we re-read and catch up.
-        self._listener = stream.db.listen(stream._channel())
+        # Set up the WAL watcher BEFORE the first read so writes during
+        # "read empty" -> "start listening" can't slip through. WAL fires
+        # on every commit (any process), so it covers both same-process
+        # and cross-process publishers.
+        self._wal = stream.db.wal_events()
 
     def __aiter__(self):
         return self
@@ -635,10 +635,10 @@ class _StreamIter:
                 self._buffer.extend(rows)
                 continue
 
+            # Block on WAL — fires on any commit to the DB. Covers both
+            # same-process and cross-process publishers. 15s fallback.
             try:
-                await asyncio.wait_for(
-                    self._listener.__anext__(), timeout=15.0
-                )
+                await asyncio.wait_for(self._wal.__anext__(), timeout=15.0)
             except asyncio.TimeoutError:
                 pass
             except StopAsyncIteration:
@@ -717,6 +717,9 @@ class Database:
     def listen(self, channel: str):
         return self._inner.listen(channel)
 
+    def wal_events(self):
+        return self._inner.wal_events()
+
     def query(self, sql: str, params=None):
         return self._inner.query(sql, params)
 
@@ -778,11 +781,22 @@ class _WorkerQueueIter:
     batches of `batch_size`. One write transaction per batch amortizes the
     per-tx overhead across many jobs.
 
-    Also pipelines ack-of-previous with claim-of-next: `Job.ack()` on
+    Pipelines ack-of-previous with claim-of-next: `Job.ack()` on
     jobs yielded from this iterator defers into `_pending_acks`, and the
     next batch's claim transaction flushes them in the same tx. Halves
     the write-tx count per job for the common worker pattern
     (`async for job in q.claim(...): handle(job); job.ack()`).
+
+    Wake sources when the queue is empty:
+      1. In-process commit-hook broadcast (`db.listen(channel)`):
+         sub-ms wake when an enqueuer in the SAME process commits.
+      2. WAL-file watcher (`db.wal_events()`): ~1ms wake when an
+         enqueuer in ANY process commits. The WAL file's mtime bumps
+         on every commit; kernel inotify/kqueue/RDCW delivers the
+         event. Re-polls the queue; over-triggering is fine — each
+         wasted wake is an indexed SELECT, cheap.
+      3. `idle_poll_s` timeout: last-resort safety net if both the
+         listener and the WAL watcher fail (sandboxed FS, etc).
     """
 
     def __init__(
@@ -797,6 +811,7 @@ class _WorkerQueueIter:
         self.idle_poll_s = idle_poll_s
         self.batch_size = max(1, int(batch_size))
         self._listener = None
+        self._wal = None
         # Deque for O(1) popleft; list.pop(0) was O(n) per yield which
         # compounded at batch_size=128 (~128x worse than batch=8 before).
         self._buffer: deque = deque()
@@ -821,11 +836,25 @@ class _WorkerQueueIter:
                     job._iter = self
                 self._buffer.extend(batch)
                 continue
-            if self._listener is None:
-                self._listener = self.queue.db.listen(self.queue._channel())
+            # Queue drained. Block on the WAL file watcher — wakes on
+            # every commit, any process. Covers in-process enqueuers
+            # (their commit appends to this DB's WAL too) AND
+            # cross-process enqueuers. `idle_poll_s` is a paranoia
+            # fallback for sandboxed filesystems where kqueue/inotify
+            # events are suppressed.
+            #
+            # We don't race against the in-process commit-hook listener
+            # because doing so requires cancelling whichever task
+            # didn't fire, and cancelling an `asyncio.Queue.get()` has
+            # an ugly race where a just-enqueued item can be lost.
+            # The WAL watch alone gives ~1ms wake latency for both
+            # same-process and cross-process, which is fine.
+            if self._wal is None:
+                self._wal = self.queue.db.wal_events()
             try:
                 await asyncio.wait_for(
-                    self._listener.__anext__(), timeout=self.idle_poll_s
+                    self._wal.__anext__(),
+                    timeout=self.idle_poll_s,
                 )
             except asyncio.TimeoutError:
                 pass

@@ -140,6 +140,7 @@ struct Database {
     notifier: Arc<Notifier>,
     writer: Arc<Writer>,
     readers: Arc<Readers>,
+    path: String,
 }
 
 #[pymethods]
@@ -152,7 +153,8 @@ impl Database {
         Ok(Self {
             notifier,
             writer: Arc::new(Writer::new(writer_conn)),
-            readers: Arc::new(Readers::new(path, max_readers)),
+            readers: Arc::new(Readers::new(path.clone(), max_readers)),
+            path,
         })
     }
 
@@ -171,6 +173,58 @@ impl Database {
             notifier: self.notifier.clone(),
             inner: Arc::new(Mutex::new(ListenerState {
                 rx: Some(sub.rx),
+                queue: None,
+            })),
+        })
+    }
+
+    /// Watcher on this database's `.db-wal` file. Returns an async
+    /// iterator that yields `None` every time the WAL changes — i.e.
+    /// every time any process committed a transaction to this file.
+    ///
+    /// Implemented as a background thread that stat()s the WAL file
+    /// at 1ms intervals, comparing (size, mtime). On change, push a
+    /// tick into an asyncio Queue on the caller side. Sidesteps
+    /// macOS FSEvents (doesn't deliver same-process writes) and
+    /// Linux inotify (needs pre-existing file) in one portable path.
+    fn wal_events(&self) -> PyResult<WalEvents> {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let wal_path: PathBuf = format!("{}-wal", self.path).into();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1024);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let wal_for_thread = wal_path.clone();
+
+        std::thread::Builder::new()
+            .name("litenotify-wal-poll".into())
+            .spawn(move || {
+                // Read initial state. If the WAL file doesn't exist yet,
+                // treat as size=0, mtime=0; creation below will be a
+                // change event.
+                let mut last = stat_pair(&wal_for_thread);
+                while !stop_thread.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                    let cur = stat_pair(&wal_for_thread);
+                    if cur != last {
+                        last = cur;
+                        // Best-effort: if channel is full the caller
+                        // hasn't caught up yet, drop; the next poll
+                        // will still see the committed rows.
+                        let _ = tx.try_send(());
+                    }
+                }
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(WalEvents {
+            wal_path,
+            inner: Arc::new(Mutex::new(WalWatchState {
+                stop,
+                rx: Some(rx),
                 queue: None,
             })),
         })
@@ -568,6 +622,127 @@ impl Listener {
     }
 }
 
+/// WAL-file watcher that yields `None` every time the watched DB's
+/// `-wal` file changes. "Changes" is detected by a background thread
+/// polling `(size, mtime_ns)` at ~1ms intervals.
+///
+/// Why not inotify/kqueue/FSEvents? The macOS default (FSEvents)
+/// doesn't deliver same-process writes reliably, so a listener and
+/// enqueuer in the same Python process wouldn't see each other's
+/// events. A dedicated stat-polling thread works identically on every
+/// platform, and at 1ms cadence the CPU cost is negligible (stat()
+/// on a single file is sub-microsecond on modern OSes).
+///
+/// Listeners re-poll their own tables on each wake. The watcher itself
+/// carries no payload — it's just a "something committed" ping.
+/// Over-triggers are expected and fine.
+struct WalWatchState {
+    /// Flag flipped to false to stop the background thread.
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Channel driven by the stat-poller.
+    rx: Option<tokio::sync::mpsc::Receiver<()>>,
+    /// Python asyncio Queue; populated lazily on first __aiter__.
+    queue: Option<Py<PyAny>>,
+}
+
+impl Drop for WalWatchState {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[pyclass]
+struct WalEvents {
+    wal_path: std::path::PathBuf,
+    inner: Arc<Mutex<WalWatchState>>,
+}
+
+impl WalEvents {
+    fn ensure_started(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut state = self.inner.lock();
+        if let Some(q) = &state.queue {
+            return Ok(q.clone_ref(py));
+        }
+        let asyncio = py.import("asyncio")?;
+        let queue = asyncio.call_method0("Queue")?;
+        let loop_obj = asyncio.call_method0("get_running_loop")?;
+
+        let queue_py: Py<PyAny> = queue.clone().unbind();
+        let queue_py_for_thread = queue_py.clone_ref(py);
+        let loop_py: Py<PyAny> = loop_obj.unbind();
+
+        // Take the existing rx created in Database.wal_events() and
+        // pump its events into the Python queue via call_soon_threadsafe,
+        // same bridge-thread pattern as Listener.
+        let mut rx = state
+            .rx
+            .take()
+            .expect("wal rx already taken");
+
+        std::thread::Builder::new()
+            .name("litenotify-wal-bridge".into())
+            .spawn(move || {
+                while rx.blocking_recv().is_some() {
+                    Python::attach(|py| {
+                        let put =
+                            match queue_py_for_thread.getattr(py, "put_nowait") {
+                                Ok(v) => v,
+                                Err(_) => return,
+                            };
+                        let _ = loop_py.call_method1(
+                            py,
+                            "call_soon_threadsafe",
+                            (put, py.None()),
+                        );
+                    });
+                }
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        state.queue = Some(queue_py.clone_ref(py));
+        Ok(queue_py)
+    }
+}
+
+/// Snapshot of the WAL file's (size, mtime_ns). Both 0 if the file
+/// does not exist. Compared as a tuple across polls to detect change.
+/// The WAL grows on every commit in WAL mode and is truncated on
+/// checkpoint; either direction produces a visible delta.
+fn stat_pair(path: &std::path::Path) -> (u64, i128) {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let len = m.len();
+            let mt = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i128)
+                .unwrap_or(0);
+            (len, mt)
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+#[pymethods]
+impl WalEvents {
+    fn __aiter__<'a>(slf: PyRef<'a, Self>, py: Python<'a>) -> PyResult<PyRef<'a, Self>> {
+        slf.ensure_started(py)?;
+        Ok(slf)
+    }
+
+    fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let queue = self.ensure_started(py)?;
+        queue.bind(py).call_method0("get")
+    }
+
+    /// Path this watcher is monitoring. Useful in tests / debugging.
+    #[getter]
+    fn path(&self) -> String {
+        self.wal_path.to_string_lossy().into_owned()
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (path, max_readers=8))]
 fn open(path: String, max_readers: usize) -> PyResult<Database> {
@@ -581,5 +756,6 @@ fn litenotify(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transaction>()?;
     m.add_class::<Listener>()?;
     m.add_class::<NotificationResult>()?;
+    m.add_class::<WalEvents>()?;
     Ok(())
 }
