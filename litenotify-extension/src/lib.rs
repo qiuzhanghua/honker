@@ -52,14 +52,18 @@ pub unsafe extern "C" fn sqlite3_litenotifyext_init(
     }
 }
 
+/// Wrap any Displayable error into rusqlite::Error::UserFunctionError so
+/// SQLite reports it back to the caller.
+fn to_sql_err<E: std::fmt::Display>(e: E) -> rusqlite::Error {
+    rusqlite::Error::UserFunctionError(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        e.to_string(),
+    )))
+}
+
 fn install_functions(conn: &Connection) -> rusqlite::Result<()> {
     // notify() scalar + _litenotify_notifications table (shared with PyO3/Node).
-    litenotify_core::attach_notify(conn).map_err(|e| {
-        rusqlite::Error::UserFunctionError(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        )))
-    })?;
+    litenotify_core::attach_notify(conn).map_err(to_sql_err)?;
 
     // jl_bootstrap() -- idempotent schema setup.
     conn.create_scalar_function(
@@ -68,11 +72,7 @@ fn install_functions(conn: &Connection) -> rusqlite::Result<()> {
         FunctionFlags::SQLITE_UTF8,
         |ctx| {
             let db = unsafe { ctx.get_connection() }?;
-            bootstrap_schema(&db).map_err(|e| {
-                rusqlite::Error::UserFunctionError(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                ))
-            })?;
+            bootstrap_schema(&db).map_err(to_sql_err)?;
             Ok(1i64)
         },
     )?;
@@ -88,11 +88,7 @@ fn install_functions(conn: &Connection) -> rusqlite::Result<()> {
             let n: i64 = ctx.get(2)?;
             let timeout_s: i64 = ctx.get(3)?;
             let db = unsafe { ctx.get_connection() }?;
-            claim_batch(&db, &queue, &worker_id, n, timeout_s).map_err(|e| {
-                rusqlite::Error::UserFunctionError(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                ))
-            })
+            claim_batch(&db, &queue, &worker_id, n, timeout_s).map_err(to_sql_err)
         },
     )?;
 
@@ -105,11 +101,97 @@ fn install_functions(conn: &Connection) -> rusqlite::Result<()> {
             let ids_json: String = ctx.get(0)?;
             let worker_id: String = ctx.get(1)?;
             let db = unsafe { ctx.get_connection() }?;
-            ack_batch(&db, &ids_json, &worker_id).map_err(|e| {
-                rusqlite::Error::UserFunctionError(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                ))
-            })
+            ack_batch(&db, &ids_json, &worker_id).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_sweep_expired(queue) -> count moved to _joblite_dead
+    conn.create_scalar_function(
+        "jl_sweep_expired",
+        1,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let queue: String = ctx.get(0)?;
+            let db = unsafe { ctx.get_connection() }?;
+            sweep_expired(&db, &queue).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_lock_acquire(name, owner, ttl_s) -> 1 if acquired, 0 if held by another
+    conn.create_scalar_function(
+        "jl_lock_acquire",
+        3,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let name: String = ctx.get(0)?;
+            let owner: String = ctx.get(1)?;
+            let ttl: i64 = ctx.get(2)?;
+            let db = unsafe { ctx.get_connection() }?;
+            lock_acquire(&db, &name, &owner, ttl).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_lock_release(name, owner) -> 1 if released, 0 if not our row
+    conn.create_scalar_function(
+        "jl_lock_release",
+        2,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let name: String = ctx.get(0)?;
+            let owner: String = ctx.get(1)?;
+            let db = unsafe { ctx.get_connection() }?;
+            lock_release(&db, &name, &owner).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_rate_limit_try(name, limit, per) -> 1 if under limit, 0 if at/over
+    conn.create_scalar_function(
+        "jl_rate_limit_try",
+        3,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let name: String = ctx.get(0)?;
+            let limit: i64 = ctx.get(1)?;
+            let per: i64 = ctx.get(2)?;
+            let db = unsafe { ctx.get_connection() }?;
+            rate_limit_try(&db, &name, limit, per).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_rate_limit_sweep(older_than_s) -> count rows deleted
+    conn.create_scalar_function(
+        "jl_rate_limit_sweep",
+        1,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let older_than_s: i64 = ctx.get(0)?;
+            let db = unsafe { ctx.get_connection() }?;
+            rate_limit_sweep(&db, older_than_s).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_scheduler_record_fire(name, fire_at_unix) -> 0
+    conn.create_scalar_function(
+        "jl_scheduler_record_fire",
+        2,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let name: String = ctx.get(0)?;
+            let fire_at: i64 = ctx.get(1)?;
+            let db = unsafe { ctx.get_connection() }?;
+            scheduler_record_fire(&db, &name, fire_at).map_err(to_sql_err)
+        },
+    )?;
+
+    // jl_scheduler_last_fire(name) -> unix_ts or 0 if never
+    conn.create_scalar_function(
+        "jl_scheduler_last_fire",
+        1,
+        FunctionFlags::SQLITE_UTF8,
+        |ctx| {
+            let name: String = ctx.get(0)?;
+            let db = unsafe { ctx.get_connection() }?;
+            scheduler_last_fire(&db, &name).map_err(to_sql_err)
         },
     )?;
 
@@ -217,6 +299,164 @@ fn ack_batch(conn: &Connection, ids_json: &str, worker_id: &str) -> rusqlite::Re
         count += 1;
     }
     Ok(count)
+}
+
+/// Move expired-pending rows from _joblite_live to _joblite_dead with
+/// last_error='expired'. Returns the count moved. Mirrors Python's
+/// `Queue.sweep_expired`.
+fn sweep_expired(conn: &Connection, queue: &str) -> rusqlite::Result<i64> {
+    let mut select = conn.prepare_cached(
+        "DELETE FROM _joblite_live
+         WHERE queue = ?1
+           AND state = 'pending'
+           AND expires_at IS NOT NULL
+           AND expires_at <= unixepoch()
+         RETURNING id, queue, payload, priority, run_at, max_attempts,
+                   attempts, created_at",
+    )?;
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(i64, String, String, i64, i64, i64, i64, i64)> = select
+        .query_map(rusqlite::params![queue], |r| {
+            Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut insert = conn.prepare_cached(
+        "INSERT INTO _joblite_dead
+           (id, queue, payload, priority, run_at, max_attempts,
+            attempts, last_error, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'expired', ?8)",
+    )?;
+    let count = rows.len() as i64;
+    for r in rows {
+        insert.execute(rusqlite::params![
+            r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7
+        ])?;
+    }
+    Ok(count)
+}
+
+/// Try to acquire a named lock. Returns 1 if we got it, 0 if held by
+/// someone else (and the TTL hasn't elapsed). Stale rows (expired
+/// TTL) are pruned opportunistically before the attempt — a crashed
+/// holder can't block others past the TTL.
+fn lock_acquire(
+    conn: &Connection,
+    name: &str,
+    owner: &str,
+    ttl_s: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "DELETE FROM _joblite_locks
+         WHERE name = ?1 AND expires_at <= unixepoch()",
+        rusqlite::params![name],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO _joblite_locks (name, owner, expires_at)
+         VALUES (?1, ?2, unixepoch() + ?3)",
+        rusqlite::params![name, owner, ttl_s],
+    )?;
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT owner FROM _joblite_locks WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(if current.as_deref() == Some(owner) { 1 } else { 0 })
+}
+
+/// Release a named lock we hold. Returns 1 if we actually owned it
+/// (and the row was deleted), 0 otherwise (TTL elapsed and another
+/// holder took over — safe no-op).
+fn lock_release(conn: &Connection, name: &str, owner: &str) -> rusqlite::Result<i64> {
+    let deleted = conn.execute(
+        "DELETE FROM _joblite_locks WHERE name = ?1 AND owner = ?2",
+        rusqlite::params![name, owner],
+    )?;
+    Ok(deleted as i64)
+}
+
+/// Fixed-window rate limit. Returns 1 if under `limit` in the current
+/// `per`-second window (and records this invocation); 0 if at the
+/// limit (no side effect, hot-loop safe). Mirrors Python's
+/// `Database.try_rate_limit`.
+fn rate_limit_try(
+    conn: &Connection,
+    name: &str,
+    limit: i64,
+    per: i64,
+) -> rusqlite::Result<i64> {
+    if limit <= 0 || per <= 0 {
+        return Err(to_sql_err("limit and per must be positive"));
+    }
+    let window_start: i64 = conn.query_row(
+        "SELECT (unixepoch() / ?1) * ?1",
+        rusqlite::params![per],
+        |r| r.get(0),
+    )?;
+    let current: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(count), 0) FROM _joblite_rate_limits
+             WHERE name = ?1 AND window_start = ?2",
+            rusqlite::params![name, window_start],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if current >= limit {
+        return Ok(0);
+    }
+    conn.execute(
+        "INSERT INTO _joblite_rate_limits (name, window_start, count)
+         VALUES (?1, ?2, 1)
+         ON CONFLICT(name, window_start) DO UPDATE SET count = count + 1",
+        rusqlite::params![name, window_start],
+    )?;
+    Ok(1)
+}
+
+/// Delete rate-limit rows older than `older_than_s` seconds. Stale
+/// windows are never consulted; this is a disk-space reclaim only.
+fn rate_limit_sweep(conn: &Connection, older_than_s: i64) -> rusqlite::Result<i64> {
+    let deleted = conn.execute(
+        "DELETE FROM _joblite_rate_limits
+         WHERE window_start < unixepoch() - ?1",
+        rusqlite::params![older_than_s],
+    )?;
+    Ok(deleted as i64)
+}
+
+/// Record a scheduler fire. UPSERT into _joblite_scheduler_state.
+fn scheduler_record_fire(
+    conn: &Connection,
+    name: &str,
+    fire_at_unix: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO _joblite_scheduler_state (name, last_fire_at)
+         VALUES (?1, ?2)
+         ON CONFLICT(name) DO UPDATE
+           SET last_fire_at = excluded.last_fire_at",
+        rusqlite::params![name, fire_at_unix],
+    )?;
+    Ok(0)
+}
+
+/// Look up the most recent fire time for a scheduled task. Returns
+/// the unix epoch or 0 if the task has never fired.
+fn scheduler_last_fire(conn: &Connection, name: &str) -> rusqlite::Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT last_fire_at FROM _joblite_scheduler_state WHERE name = ?1",
+            rusqlite::params![name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0))
 }
 
 struct ClaimedRow {

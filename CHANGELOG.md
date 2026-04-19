@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## Unreleased — extension SQL for Batch 2 + scheduler features
+
+Every feature we added in Batches 2.1-2.3 plus the crontab
+scheduler now also exists as SQL functions in the loadable
+extension. The Python inline SQL still exists (working code, not
+touched), but any SQLite client loading `liblitenotify_ext` gets
+the full feature set.
+
+### New SQL functions
+
+| Function                                | Returns  | Mirrors                              |
+|-----------------------------------------|----------|--------------------------------------|
+| `jl_sweep_expired(queue)`               | count    | `Queue.sweep_expired()`              |
+| `jl_lock_acquire(name, owner, ttl_s)`   | 1 / 0    | `Database.lock` context-manager enter|
+| `jl_lock_release(name, owner)`          | 1 / 0    | `Database.lock` context-manager exit |
+| `jl_rate_limit_try(name, limit, per)`   | 1 / 0    | `Database.try_rate_limit`            |
+| `jl_rate_limit_sweep(older_than_s)`     | count    | `Database.sweep_rate_limits`         |
+| `jl_scheduler_record_fire(name, at)`    | 0        | `Scheduler._record_fire`             |
+| `jl_scheduler_last_fire(name)`          | unix_ts  | `Scheduler._load_last_fires` (one)   |
+
+### Interop guarantees
+
+`tests/test_extension_interop.py` grew 10 new tests that exercise
+each new function via `sqlite3` + `.load` and verify the effect on
+the shared tables. Cross-side interop tests prove that:
+
+- Python `db.lock("x")` blocks extension `jl_lock_acquire("x", ...)`
+  and vice versa (same `_joblite_locks` table).
+- Python `db.try_rate_limit("x", 3, 60)` and extension
+  `jl_rate_limit_try("x", 3, 60)` share one counter — four calls
+  total across both sides fail the fourth.
+- Scheduler's `_record_fire` and `jl_scheduler_last_fire` read / write
+  the same `_joblite_scheduler_state` row.
+
+### Design notes
+
+- Extracted a `to_sql_err` helper in the extension to cut the
+  `UserFunctionError(Box::new(...))` boilerplate from every scalar
+  function. Each function is now a ~3-line wrapper around a Rust
+  helper that does the SQL.
+- The SQL strings live in the Rust helpers (independent of the
+  Python inline SQL). Interop tests verify both paths produce the
+  same effect on the tables, so they can't silently drift.
+
+### Why now
+
+Two non-Python bindings are on the roadmap (Go, Ruby) plus a
+`joblite-node` TypeScript port that wraps `@litenotify/node`.
+Every feature the extension exposes as SQL is one less thing each
+new binding has to re-implement. New bindings become "load the
+extension + pretty-wrap the SQL calls" instead of "port the Queue
+class in N languages."
+
+For forward features: extension-first. Task result storage will get
+`jl_result_save(id, value, expires_at)` + `jl_result_get(id)` as
+its canonical interface; Python wraps those.
+
 ## Unreleased — crontab / periodic tasks
 
 Adds `joblite.Scheduler` + `joblite.crontab(expr)` for cron-style

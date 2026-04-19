@@ -142,6 +142,13 @@ SELECT jl_bootstrap();
 INSERT INTO _joblite_live (queue, payload) VALUES ('emails', '{"to":"alice"}');
 SELECT jl_claim_batch('emails', 'worker-1', 32, 300);    -- JSON array
 SELECT jl_ack_batch('[1,2,3]', 'worker-1');              -- DELETEs; returns count
+SELECT jl_sweep_expired('emails');                       -- count moved to dead
+SELECT jl_lock_acquire('backup', 'me', 60);              -- 1 = got it, 0 = held
+SELECT jl_lock_release('backup', 'me');                  -- 1 = released
+SELECT jl_rate_limit_try('api', 10, 60);                 -- 1 = under, 0 = at limit
+SELECT jl_rate_limit_sweep(3600);                        -- drop windows >1h old
+SELECT jl_scheduler_record_fire('nightly', unixepoch()); -- UPSERT fire-time
+SELECT jl_scheduler_last_fire('nightly');                -- unix_ts or 0
 SELECT notify('orders', '{"id":42}');
 ```
 

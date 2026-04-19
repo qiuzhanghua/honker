@@ -138,3 +138,261 @@ def test_extension_registers_notify_function(ext_db_path):
     assert count == 1
 
     conn.close()
+
+
+def _open_ext(path: str):
+    """Open an sqlite3 conn with the extension loaded and the schema
+    bootstrapped. Helper for the interop tests below."""
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True)
+    conn.load_extension(_EXT_PATH)
+    conn.execute("SELECT jl_bootstrap()")
+    conn.commit()
+    return conn
+
+
+# ---------- jl_sweep_expired ----------
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_sweep_expired_moves_to_dead(ext_db_path):
+    """`jl_sweep_expired(queue)` must produce the same result as
+    Python's `Queue.sweep_expired()`: delete pending rows whose
+    `expires_at <= unixepoch()`, insert them into `_joblite_dead`
+    with `last_error='expired'`.
+    """
+    # Seed via Python joblite so we know the enqueue path is honest.
+    db = joblite.open(ext_db_path)
+    q = db.queue("exp-ext")
+    q.enqueue({"i": 1}, expires=-1)
+    q.enqueue({"i": 2}, expires=-1)
+    q.enqueue({"i": 3}, expires=3600)  # live
+
+    # Sweep via extension.
+    conn = _open_ext(ext_db_path)
+    moved = conn.execute(
+        "SELECT jl_sweep_expired('exp-ext')"
+    ).fetchone()[0]
+    conn.commit()
+    conn.close()
+
+    assert moved == 2
+    # Python can read the same state.
+    live = db.query(
+        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='exp-ext'"
+    )[0]["c"]
+    assert live == 1
+    dead = db.query(
+        "SELECT payload, last_error FROM _joblite_dead "
+        "WHERE queue='exp-ext' ORDER BY id"
+    )
+    assert len(dead) == 2
+    assert all(r["last_error"] == "expired" for r in dead)
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_sweep_expired_is_idempotent(ext_db_path):
+    db = joblite.open(ext_db_path)
+    q = db.queue("exp-idem")
+    q.enqueue({"i": 1}, expires=-1)
+
+    conn = _open_ext(ext_db_path)
+    assert conn.execute("SELECT jl_sweep_expired('exp-idem')").fetchone()[0] == 1
+    assert conn.execute("SELECT jl_sweep_expired('exp-idem')").fetchone()[0] == 0
+    conn.commit()
+    conn.close()
+
+
+# ---------- jl_lock_acquire / jl_lock_release ----------
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_lock_acquire_release(ext_db_path):
+    """`jl_lock_acquire` returns 1 on first acquire, 0 if held by
+    another owner, 1 again after release. Mirrors Python's `_Lock`.
+    """
+    conn = _open_ext(ext_db_path)
+    assert conn.execute(
+        "SELECT jl_lock_acquire('backup', 'alice', 60)"
+    ).fetchone()[0] == 1
+
+    # Second acquire from a different owner must fail.
+    assert conn.execute(
+        "SELECT jl_lock_acquire('backup', 'bob', 60)"
+    ).fetchone()[0] == 0
+
+    # Release — only alice can.
+    assert conn.execute(
+        "SELECT jl_lock_release('backup', 'bob')"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT jl_lock_release('backup', 'alice')"
+    ).fetchone()[0] == 1
+    conn.commit()
+
+    # After release, bob can acquire.
+    assert conn.execute(
+        "SELECT jl_lock_acquire('backup', 'bob', 60)"
+    ).fetchone()[0] == 1
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_lock_prunes_stale(ext_db_path):
+    """If a holder's TTL has elapsed, a new acquirer gets the lock."""
+    conn = _open_ext(ext_db_path)
+    # Insert a row that expired an hour ago — simulates a crashed holder.
+    conn.execute(
+        "INSERT INTO _joblite_locks (name, owner, expires_at) "
+        "VALUES ('stale', 'crashed', unixepoch() - 3600)"
+    )
+    conn.commit()
+
+    assert conn.execute(
+        "SELECT jl_lock_acquire('stale', 'fresh', 60)"
+    ).fetchone()[0] == 1
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_lock_interops_with_python(ext_db_path):
+    """Python's `db.lock()` and extension `jl_lock_acquire` use the
+    same table. Acquiring from one side blocks the other."""
+    db = joblite.open(ext_db_path)
+    conn = _open_ext(ext_db_path)
+
+    # Python holds the lock...
+    with db.lock("shared", ttl=60):
+        # ...extension fails to acquire.
+        assert conn.execute(
+            "SELECT jl_lock_acquire('shared', 'ext-side', 60)"
+        ).fetchone()[0] == 0
+
+    conn.commit()
+    # Python released. Extension can now grab it.
+    assert conn.execute(
+        "SELECT jl_lock_acquire('shared', 'ext-side', 60)"
+    ).fetchone()[0] == 1
+    conn.commit()
+    conn.close()
+
+
+# ---------- jl_rate_limit_try / jl_rate_limit_sweep ----------
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_rate_limit_try(ext_db_path):
+    conn = _open_ext(ext_db_path)
+    for _ in range(3):
+        assert conn.execute(
+            "SELECT jl_rate_limit_try('api', 3, 60)"
+        ).fetchone()[0] == 1
+    # Over limit.
+    for _ in range(5):
+        assert conn.execute(
+            "SELECT jl_rate_limit_try('api', 3, 60)"
+        ).fetchone()[0] == 0
+    # Count capped at 3 (rejected calls not counted).
+    conn.commit()
+    count = conn.execute(
+        "SELECT count FROM _joblite_rate_limits WHERE name='api'"
+    ).fetchone()[0]
+    assert count == 3
+    conn.close()
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_rate_limit_interops_with_python(ext_db_path):
+    """Extension-side `jl_rate_limit_try` and Python's
+    `db.try_rate_limit` share the same table and window."""
+    db = joblite.open(ext_db_path)
+    conn = _open_ext(ext_db_path)
+
+    # Use up 2 of 3 on the Python side.
+    assert db.try_rate_limit("cross", limit=3, per=60) is True
+    assert db.try_rate_limit("cross", limit=3, per=60) is True
+
+    # Extension sees 1 slot left.
+    assert conn.execute(
+        "SELECT jl_rate_limit_try('cross', 3, 60)"
+    ).fetchone()[0] == 1
+    conn.commit()
+
+    # Fourth call from either side is rejected.
+    assert db.try_rate_limit("cross", limit=3, per=60) is False
+    assert conn.execute(
+        "SELECT jl_rate_limit_try('cross', 3, 60)"
+    ).fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_rate_limit_sweep(ext_db_path):
+    conn = _open_ext(ext_db_path)
+    conn.execute(
+        "INSERT INTO _joblite_rate_limits (name, window_start, count) "
+        "VALUES ('old', unixepoch() - 100000, 10)"
+    )
+    conn.execute("SELECT jl_rate_limit_try('fresh', 10, 60)")
+    conn.commit()
+
+    deleted = conn.execute("SELECT jl_rate_limit_sweep(3600)").fetchone()[0]
+    conn.commit()
+    assert deleted == 1
+    remaining = conn.execute(
+        "SELECT name FROM _joblite_rate_limits"
+    ).fetchall()
+    assert [r[0] for r in remaining] == ["fresh"]
+    conn.close()
+
+
+# ---------- jl_scheduler_record_fire / jl_scheduler_last_fire ----------
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_scheduler_state(ext_db_path):
+    """`jl_scheduler_record_fire` + `jl_scheduler_last_fire` are the
+    extension-side equivalents of Python `Scheduler._record_fire` +
+    `_load_last_fires`."""
+    conn = _open_ext(ext_db_path)
+    # Never fired.
+    assert conn.execute(
+        "SELECT jl_scheduler_last_fire('nightly')"
+    ).fetchone()[0] == 0
+
+    # Record a fire.
+    conn.execute("SELECT jl_scheduler_record_fire('nightly', 1700000000)")
+    conn.commit()
+
+    assert conn.execute(
+        "SELECT jl_scheduler_last_fire('nightly')"
+    ).fetchone()[0] == 1700000000
+
+    # UPSERT replaces.
+    conn.execute("SELECT jl_scheduler_record_fire('nightly', 1800000000)")
+    conn.commit()
+    assert conn.execute(
+        "SELECT jl_scheduler_last_fire('nightly')"
+    ).fetchone()[0] == 1800000000
+
+    conn.close()
+
+
+@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+def test_extension_scheduler_interops_with_python(ext_db_path):
+    """Python `Scheduler._record_fire` and extension
+    `jl_scheduler_record_fire` write to the same row."""
+    db = joblite.open(ext_db_path)
+    from joblite import Scheduler, crontab
+
+    sched = Scheduler(db)
+    sched.add(name="t", queue="q", schedule=crontab("0 3 * * *"))
+    sched._record_fire("t", 1700000000)
+
+    conn = _open_ext(ext_db_path)
+    assert conn.execute(
+        "SELECT jl_scheduler_last_fire('t')"
+    ).fetchone()[0] == 1700000000
+    conn.close()
