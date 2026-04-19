@@ -12,7 +12,7 @@ Scope is **one machine, one `.db` file.** Cross-machine delivery is an applicati
 
 If you run Postgres, keep Postgres — `pg_notify`, `pg-boss`, and Oban are excellent. This project explores what's possible on one SQLite file when you don't want Redis, RabbitMQ, or a second service.
 
-Ships as a Rust crate (`litenotify`, with PyO3 bindings), a Python package (`joblite`), a SQLite loadable extension (`liblitenotify_ext.dylib`/`.so`), and two framework plugins (`joblite_fastapi`, `joblite_django`). Node, Go, and Ruby bindings are on the [ROADMAP](ROADMAP.md).
+Ships as a Rust workspace with a PyO3 Python binding (`litenotify`), a Node.js binding via napi-rs (`litenotify-node`), a Python package for the higher-level queue / stream / outbox primitives (`joblite`), a SQLite loadable extension (`liblitenotify_ext.dylib`/`.so`) that any SQLite client can load, and three framework plugins (`joblite_fastapi`, `joblite_django`, `joblite_flask`). Cross-language interop is end-to-end tested: `litenotify-node/test/cross_lang.js` watches a `.db-wal` from Node while a Python subprocess fires notifications against the same file. Go and Ruby bindings are on the [ROADMAP](ROADMAP.md).
 
 ## Goals
 
@@ -154,18 +154,31 @@ Every primitive (`queue.enqueue`, `stream.publish`, `tx.notify`) accepts a `tx=t
 
 ## Framework plugins
 
-`joblite_fastapi.JobliteApp(app, db)` registers SSE endpoints, a worker pool, and an `authorize(user, target)` hook.
-`joblite_django.task("emails")` + `python manage.py joblite_worker` gives Django workers on the same shape. Async views expose `/joblite/subscribe/{channel}` and `/joblite/stream/{name}`.
+- **`joblite_fastapi.JobliteApp(app, db)`** — registers SSE endpoints, a worker pool driven by FastAPI's lifespan events, and an `authorize(user, target)` hook.
+- **`joblite_django`** — `@joblite_django.task("emails")` task registry, async SSE views, `python manage.py joblite_worker` command.
+- **`joblite_flask.JobliteFlask(app, db)`** — Flask 3 plugin with sync-bridged SSE streaming and a `flask joblite_worker` CLI command. Bridges joblite's async iterators to Flask's WSGI response iterator via a per-request background thread.
 
-Both plugins are thin. See `joblite_fastapi/joblite_fastapi.py` and `joblite_django/views.py` for the ~400-line total wiring.
+All three accept sync OR async `authorize(user, target)`. If authorize raises, the framework returns HTTP 500 — the SSE stream is never opened.
+
+Plugins are thin — ~200–400 lines each. See `joblite_fastapi/`, `joblite_django/`, `joblite_flask/` for the wiring.
 
 ## Tests and bench
 
 ```bash
-cargo test -p litenotify                  # 12 Rust tests (commit-hook semantics, rollback, etc.)
-pytest tests/                             # 112 Python tests, ~7–13s parallel
+# Rust (notifier semantics)
+cargo test -p litenotify
+
+# Python (queue, stream, outbox, listener, fastapi, django, flask)
+pytest tests/                            # 117 tests
+
+# Node (basic ops + cross-language e2e with a Python subprocess)
+cd litenotify-node && npm test           # 6 tests
+
+# Realistic cross-process concurrent bench
 python bench/real_bench.py --workers 4 --enqueuers 2 --seconds 15
-python bench/ext_bench.py                 # raw-SQL ceiling via the loadable extension
+
+# Raw-SQL engine ceiling via the loadable extension
+python bench/ext_bench.py
 ```
 
 ## License

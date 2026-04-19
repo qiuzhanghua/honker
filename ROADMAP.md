@@ -1,60 +1,63 @@
 # ROADMAP
 
-## Now
+## Shipped
 
-- **Perf pass 4.** Cheap wins before schema refactor: pipeline
-  ack-with-next-claim in `_WorkerQueueIter`, narrow `RETURNING` to
-  (id, worker_id, payload, attempts), PRAGMA tuning (cache_size=-32000,
-  wal_autocheckpoint=10000).
-- **Perf pass 5: tables-per-state.** Split `_joblite_jobs` into
-  `_joblite_jobs_pending`, `_joblite_jobs_processing`, `_joblite_jobs_dead`.
-  Claim = DELETE RETURNING from pending + INSERT into processing. Ack =
-  DELETE from processing. Pending stays small and cache-hot. Expected
-  3-5x on claim+ack.
+- Cross-process NOTIFY/LISTEN via a `_litenotify_notifications` table
+  and a 1 ms stat-polling WAL-file watcher. Measured 0.5 ms p50
+  wake latency under realistic multi-process load.
+- `joblite.Queue` (at-least-once with visibility timeout, partial-index
+  claim, `claim_batch` / `ack_batch`), `joblite.Stream` (durable
+  pub/sub with per-consumer offsets), `joblite.Outbox`.
+- `joblite.Database.prune_notifications(older_than_s, max_keep)` —
+  user-invoked; no magic background timer.
+- Framework plugins: `joblite_fastapi`, `joblite_django`, `joblite_flask`.
+- SQLite loadable extension (`liblitenotify_ext.dylib`/`.so`) with
+  `jl_bootstrap()`, `jl_claim_batch()`, `jl_ack_batch()` SQL
+  functions for callers that don't go through the Python API.
+- Node.js binding via napi-rs (`litenotify-node`). Cross-language
+  interop tested: Python subprocess fires notifications, Node
+  subscriber receives them via `walEvents.next()` + `SELECT`.
+- Independently buildable Python wheels: `joblite`, `joblite-fastapi`,
+  `joblite-django`, `joblite-flask`.
 
-## Next: loadable extension architecture
+## Next
 
-Split the Rust workspace so the project ships as:
+- **Consolidate core Rust into `litenotify-core` rlib.** The PyO3
+  crate, the loadable-extension cdylib, and the napi-rs crate each
+  have a small duplicate copy of the `notify()` SQL function
+  installation, the writer/readers pool, and the stat-poll watcher.
+  Moving these into a shared `rlib` dep would eliminate ~200 lines of
+  duplication. Purely cleanup; not blocking.
+- **`joblite-node`**: a TypeScript port of `joblite.Queue` / `Stream`
+  / `Outbox` built on `@litenotify/node`. Would make the cross-language
+  story symmetric.
+- **`joblite-express`**: Express middleware wrapping `@litenotify/node`
+  + a TypeScript `Queue` — SSE endpoint, worker pool, `authorize` hook.
+- **Go and Ruby bindings**. Go via cgo over a C ABI that `litenotify-core`
+  would export; Ruby via magnus.
 
-- `litenotify` (pure Rust lib) — Notifier + commit-hook plumbing.
-- `litenotify-extension` (cdylib) — SQLite loadable extension. Users
-  `conn.load_extension("litenotify.so")` on any SQLite connection and
-  get the `notify(channel, payload)` SQL function + commit hook. No
-  wrapper DB class required.
-- `litenotify-python` (PyO3 wrapper) — thin bindings for async listen;
-  relies on a process-global Notifier keyed by DB path so it can
-  subscribe to notifications fired by any other connection in the
-  process (including ones opened through Django/SQLAlchemy/etc.).
+## Perf
 
-## Multi-language bindings
-
-Once the loadable extension ships:
-
-- `litenotify-node` (napi-rs) — proof of the pattern.
-- `litenotify-go` (cgo over a C ABI) — note: cgo call cost is
-  non-trivial, so Go bindings may reimplement hot paths in pure Go
-  using the extension only for notifications.
-- `litenotify-ruby` (magnus) and friends, as demand warrants.
-
-## Framework plugins (once bindings settle)
-
-- `joblite-flask`, `joblite-rails` — same shape as `joblite-fastapi`
-  and `joblite-django` today.
-- `joblite-express` — SSE + Last-Event-ID + worker pool.
-
-## Single-tx perf ceiling
-
-Bench shows `litenotify.tx` at ~14k/s vs raw Python `sqlite3` at ~47k/s
-on the same WAL+`synchronous=NORMAL` file. 3-4x gap is PyO3 boundary
-crossings, writer-mutex acquire/release, GIL detach/reacquire.
-`prepare_cached` and `try_acquire` already applied. Further gains would
-require reducing PyO3 calls per transaction (for example, a single
-`execute_tx(stmts)` that batches BEGIN + body + COMMIT in one PyO3
-call). Low priority; batched workloads already clear 100k/s.
+- **Shave PyO3 / mutex / GIL overhead off single-tx.** Bench shows
+  ~14 k/s for raw `litenotify.tx.execute(INSERT)` vs ~47 k/s for raw
+  Python `sqlite3` on the same file (WAL ceiling). 3× gap is
+  per-tx fixed cost. `prepare_cached` and `try_acquire` already
+  applied; further gains would need reducing PyO3 call count per tx
+  (e.g. a combined `execute_tx(stmts)` that batches BEGIN + body +
+  COMMIT in one call). Low priority — batched workloads already
+  clear 100 k/s.
+- **Stream consumer groups**. For Kafka-style "competing consumers
+  within a named group, each with a shared advancing offset," wire
+  a group-scoped atomic UPDATE on `_joblite_stream_consumers` on top
+  of the existing stream. No schema change required. Not needed
+  until someone asks.
+- **`litenotify-node` direct claim/ack**. The Node binding exposes
+  the primitives (Database, Transaction, wal_events); a joblite-node
+  Queue wrapping them is the natural next step.
 
 ## Docs
 
-- `docs/` site with runnable snippets per binding.
-- Publish benchmark baselines for reference hardware.
-- Document the "notifier is per-process" story (cross-process wake-ups
-  fall back to `idle_poll_s` polling in `Queue.claim` — by design).
+- Publish benchmark baselines for reference hardware beyond the
+  M-series + release build numbers in bench/README.
+- A small `docs/` site with runnable snippets per binding and
+  framework plugin.
