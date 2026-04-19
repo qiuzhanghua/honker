@@ -13,10 +13,7 @@ name = "litenotify_ext"
 crate-type = ["cdylib"]
 
 [dependencies]
-parking_lot = "0.12.5"
+litenotify-core = { path = "../litenotify-core" }
 # "loadable_extension" feature makes rusqlite usable from inside a
 # sqlite3_extension_init entry point.
 rusqlite = { version = "0.39.0", features = ["functions", "hooks", "loadable_extension"] }
-serde = { version = "1.0.228", features = ["derive"] }
-thiserror = "2.0.18"
-tokio = { version = "1.52.1", features = ["sync"] }

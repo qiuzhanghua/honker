@@ -23,79 +23,22 @@
 //! JS and SQLite. Users can pass numbers, strings, booleans, null,
 //! arrays, and objects; objects/arrays get JSON-stringified.
 //!
-//! NOTE: this crate duplicates some Rust from the PyO3 crate
-//! (`litenotify/src/lib.rs`). Both copies work against the same
-//! `.db` + `.db-wal` files — interop across processes goes through the
-//! filesystem, not shared in-process state. Planned consolidation into
-//! a shared `litenotify-core` rlib is out of scope for this commit.
+//! Writer pool, reader pool, connection open, notify() attach, and WAL
+//! file watcher all come from the shared `litenotify-core` rlib so the
+//! PyO3, SQLite-extension, and Node bindings can't drift apart.
 
+use litenotify_core::{Readers, WalWatcher, Writer, open_conn};
 use napi::Result;
 use napi_derive::napi;
-use parking_lot::{Condvar, Mutex};
-use rusqlite::functions::FunctionFlags;
+use parking_lot::Mutex;
+use rusqlite::Connection;
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value as JsonValue};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 fn napi_err(e: impl std::fmt::Display) -> napi::Error {
     napi::Error::new(napi::Status::GenericFailure, e.to_string())
-}
-
-// ---------- Shared open + notify attach ----------
-
-fn attach_notify(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS _litenotify_notifications (
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           channel TEXT NOT NULL,
-           payload TEXT NOT NULL,
-           created_at INTEGER NOT NULL DEFAULT (unixepoch())
-         );
-         CREATE INDEX IF NOT EXISTS _litenotify_notifications_recent
-           ON _litenotify_notifications(channel, id);",
-    )?;
-    conn.create_scalar_function(
-        "notify",
-        2,
-        FunctionFlags::SQLITE_UTF8,
-        |ctx| {
-            let channel: String = ctx.get(0)?;
-            let payload: String = ctx.get(1)?;
-            let db = unsafe { ctx.get_connection() }?;
-            let mut ins = db.prepare_cached(
-                "INSERT INTO _litenotify_notifications (channel, payload) VALUES (?1, ?2)",
-            )?;
-            let id = ins.insert(rusqlite::params![channel, payload])?;
-            Ok(id)
-        },
-    )?;
-    Ok(())
-}
-
-fn open_conn(path: &str, install_notify: bool) -> rusqlite::Result<Connection> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA busy_timeout = 5000;
-         PRAGMA foreign_keys = ON;
-         PRAGMA cache_size = -32000;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA wal_autocheckpoint = 10000;",
-    )?;
-    if install_notify {
-        attach_notify(&conn)?;
-    }
-    Ok(conn)
 }
 
 // ---------- JSON <-> SQL param conversion ----------
@@ -114,7 +57,7 @@ fn json_to_sql(v: &JsonValue) -> SqlValue {
             }
         }
         JsonValue::String(s) => SqlValue::Text(s.clone()),
-        // Objects/arrays are SQL-serialized as JSON text — consistent with
+        // Objects/arrays are SQL-serialized as JSON text, consistent with
         // how joblite.Queue.enqueue(payload) treats dicts/lists.
         JsonValue::Array(_) | JsonValue::Object(_) => SqlValue::Text(v.to_string()),
     }
@@ -130,9 +73,6 @@ fn row_to_json(columns: &[String], row: &rusqlite::Row) -> rusqlite::Result<Json
             ValueRef::Real(f) => JsonValue::from(f),
             ValueRef::Text(t) => JsonValue::from(std::str::from_utf8(t).unwrap_or("")),
             ValueRef::Blob(b) => {
-                // Base64 would be more compact, but sticking with hex keeps
-                // one fewer dep. Blob return values are uncommon on this
-                // binding anyway (most rows are payload JSON strings).
                 let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
                 JsonValue::from(hex)
             }
@@ -165,96 +105,6 @@ fn run_execute(conn: &Connection, sql: &str, params: &[SqlValue]) -> Result<u32>
 
 fn sql_params_from_json(arr: Option<Vec<JsonValue>>) -> Vec<SqlValue> {
     arr.unwrap_or_default().iter().map(json_to_sql).collect()
-}
-
-fn stat_pair(path: &std::path::Path) -> (u64, i128) {
-    match std::fs::metadata(path) {
-        Ok(m) => {
-            let len = m.len();
-            let mt = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as i128)
-                .unwrap_or(0);
-            (len, mt)
-        }
-        Err(_) => (0, 0),
-    }
-}
-
-// ---------- Writer / Readers pools ----------
-
-struct Writer {
-    slot: Mutex<Option<Connection>>,
-    available: Condvar,
-}
-
-impl Writer {
-    fn new(conn: Connection) -> Self {
-        Self {
-            slot: Mutex::new(Some(conn)),
-            available: Condvar::new(),
-        }
-    }
-
-    fn acquire(&self) -> Connection {
-        let mut guard = self.slot.lock();
-        while guard.is_none() {
-            self.available.wait(&mut guard);
-        }
-        guard.take().unwrap()
-    }
-
-    fn release(&self, conn: Connection) {
-        let mut guard = self.slot.lock();
-        *guard = Some(conn);
-        self.available.notify_one();
-    }
-}
-
-struct Readers {
-    pool: Mutex<Vec<Connection>>,
-    outstanding: Mutex<usize>,
-    available: Condvar,
-    path: String,
-    max: usize,
-}
-
-impl Readers {
-    fn new(path: String, max: usize) -> Self {
-        Self {
-            pool: Mutex::new(Vec::new()),
-            outstanding: Mutex::new(0),
-            available: Condvar::new(),
-            path,
-            max: max.max(1),
-        }
-    }
-
-    fn acquire(&self) -> rusqlite::Result<Connection> {
-        loop {
-            let mut pool = self.pool.lock();
-            if let Some(c) = pool.pop() {
-                return Ok(c);
-            }
-            let mut out = self.outstanding.lock();
-            if *out < self.max {
-                *out += 1;
-                drop(out);
-                drop(pool);
-                return open_conn(&self.path, false);
-            }
-            drop(out);
-            self.available.wait(&mut pool);
-        }
-    }
-
-    fn release(&self, conn: Connection) {
-        let mut pool = self.pool.lock();
-        pool.push(conn);
-        self.available.notify_one();
-    }
 }
 
 // ---------- napi-rs classes ----------
@@ -309,25 +159,11 @@ impl Database {
     pub fn wal_events(&self) -> Result<WalEvents> {
         let wal_path: PathBuf = format!("{}-wal", self.path).into();
         let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1024);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_t = stop.clone();
-        let wal_t = wal_path.clone();
-        std::thread::Builder::new()
-            .name("litenotify-wal-poll".into())
-            .spawn(move || {
-                let mut last = stat_pair(&wal_t);
-                while !stop_t.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(1));
-                    let cur = stat_pair(&wal_t);
-                    if cur != last {
-                        last = cur;
-                        let _ = tx.try_send(());
-                    }
-                }
-            })
-            .map_err(napi_err)?;
+        let watcher = WalWatcher::spawn(wal_path, move || {
+            let _ = tx.try_send(());
+        });
         Ok(WalEvents {
-            stop,
+            _watcher: Arc::new(Mutex::new(Some(watcher))),
             rx: Arc::new(Mutex::new(rx)),
         })
     }
@@ -495,7 +331,8 @@ impl Transaction {
 
 #[napi]
 pub struct WalEvents {
-    stop: Arc<AtomicBool>,
+    // Option so .close() can drop (and stop) the watcher thread eagerly.
+    _watcher: Arc<Mutex<Option<WalWatcher>>>,
     rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
@@ -517,7 +354,7 @@ impl WalEvents {
     /// Stop the background stat-poll thread.
     #[napi]
     pub fn close(&self) {
-        self.stop.store(true, Ordering::Release);
+        self._watcher.lock().take();
     }
 }
 

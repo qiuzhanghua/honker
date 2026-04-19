@@ -53,6 +53,14 @@ pub unsafe extern "C" fn sqlite3_litenotifyext_init(
 }
 
 fn install_functions(conn: &Connection) -> rusqlite::Result<()> {
+    // notify() scalar + _litenotify_notifications table (shared with PyO3/Node).
+    litenotify_core::attach_notify(conn).map_err(|e| {
+        rusqlite::Error::UserFunctionError(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))
+    })?;
+
     // jl_bootstrap() -- idempotent schema setup.
     conn.create_scalar_function(
         "jl_bootstrap",

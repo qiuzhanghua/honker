@@ -255,37 +255,41 @@ dependencies = [
 name = "litenotify"
 version = "0.1.0"
 dependencies = [
+ "litenotify-core",
  "parking_lot",
  "pyo3",
  "rusqlite",
- "serde",
- "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "litenotify-core"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "rusqlite",
+ "thiserror",
 ]
 
 [[package]]
 name = "litenotify-extension"
 version = "0.1.0"
 dependencies = [
- "parking_lot",
+ "litenotify-core",
  "rusqlite",
- "serde",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
 name = "litenotify-node"
 version = "0.1.0"
 dependencies = [
+ "litenotify-core",
  "napi",
  "napi-build",
  "napi-derive",
  "parking_lot",
  "rusqlite",
- "serde",
  "serde_json",
- "thiserror",
  "tokio",
 ]
 
@@ -568,7 +572,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
- "serde_derive",
 ]
 
 [[package]]
