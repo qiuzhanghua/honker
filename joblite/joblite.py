@@ -106,47 +106,117 @@ class Queue:
         self._init_schema()
 
     def _init_schema(self):
+        # Tables-per-state schema.
+        #
+        # Pending is the hot table — every claim hits its index, every
+        # enqueue appends here. Rows LEAVE pending on claim (moved to
+        # processing); the pending table stays small relative to total job
+        # volume and its index stays cache-hot.
+        #
+        # Processing holds in-flight claims. Only scanned when the pending
+        # table is drained and we need to reclaim expired claims
+        # (opportunistic sweep inside claim_batch when pending returns 0).
+        # Steady-state workers never scan this table.
+        #
+        # Dead is terminal. Never scanned during claim. Keeps failed-job
+        # history for inspection; truncate at will.
+        #
+        # A `_joblite_jobs` VIEW unions the three so inspection queries
+        # (`SELECT COUNT(*) FROM _joblite_jobs WHERE state='done'`) still
+        # work. 'done' is synthetic: jobs that ack are DELETEd from
+        # processing and don't live in any table (no-op row).
         with self.db.transaction() as tx:
             tx.execute(
                 """
-                CREATE TABLE IF NOT EXISTS _joblite_jobs (
+                CREATE TABLE IF NOT EXISTS _joblite_pending (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   queue TEXT NOT NULL,
                   payload TEXT NOT NULL,
-                  state TEXT NOT NULL DEFAULT 'pending',
                   priority INTEGER NOT NULL DEFAULT 0,
                   run_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                  worker_id TEXT,
-                  claim_expires_at INTEGER,
                   attempts INTEGER NOT NULL DEFAULT 0,
                   max_attempts INTEGER NOT NULL DEFAULT 3,
-                  last_error TEXT,
                   created_at INTEGER NOT NULL DEFAULT (unixepoch())
                 )
                 """
             )
-            # Partial index keyed on (queue, priority DESC, run_at, id) with
-            # a WHERE clause filtering to only claimable jobs. Critical that
-            # `state` is NOT in the key: changing state on claim (pending ->
-            # processing) would otherwise force the row to reshuffle in the
-            # B-tree, which measured at ~9x slowdown per UPDATE. The state
-            # filter is in the partial-index WHERE clause; the planner still
-            # matches it against the query predicate. When state transitions
-            # to 'done' / 'dead' the row drops out of the index entirely
-            # (cheap single-key delete, no B-tree rewrite).
-            #
-            # `_v2` suffix so CREATE IF NOT EXISTS stays idempotent even
-            # when the old full-key index is being dropped alongside.
             tx.execute(
                 """
-                CREATE INDEX IF NOT EXISTS _joblite_jobs_claim_v2
-                  ON _joblite_jobs(queue, priority DESC, run_at, id)
-                  WHERE state IN ('pending', 'processing')
+                CREATE TABLE IF NOT EXISTS _joblite_processing (
+                  id INTEGER PRIMARY KEY,
+                  queue TEXT NOT NULL,
+                  payload TEXT NOT NULL,
+                  priority INTEGER NOT NULL DEFAULT 0,
+                  run_at INTEGER NOT NULL,
+                  attempts INTEGER NOT NULL,
+                  max_attempts INTEGER NOT NULL,
+                  worker_id TEXT NOT NULL,
+                  claim_expires_at INTEGER NOT NULL,
+                  created_at INTEGER NOT NULL
+                )
                 """
             )
-            # Drop the old full-key index from any DB initialized before
-            # this change. Cheap no-op on fresh DBs.
+            tx.execute(
+                """
+                CREATE TABLE IF NOT EXISTS _joblite_dead (
+                  id INTEGER PRIMARY KEY,
+                  queue TEXT NOT NULL,
+                  payload TEXT NOT NULL,
+                  priority INTEGER NOT NULL DEFAULT 0,
+                  run_at INTEGER NOT NULL DEFAULT 0,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  max_attempts INTEGER NOT NULL DEFAULT 0,
+                  last_error TEXT,
+                  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                  died_at INTEGER NOT NULL DEFAULT (unixepoch())
+                )
+                """
+            )
+            # Claim index on pending. Narrow key, no state column, no
+            # partial predicate required — every row here is claimable
+            # (pending IS the "claimable" state).
+            tx.execute(
+                """
+                CREATE INDEX IF NOT EXISTS _joblite_pending_claim
+                  ON _joblite_pending(queue, priority DESC, run_at, id)
+                """
+            )
+            # Processing index for the expired-reclaim sweep that runs
+            # when pending is empty. Queue + claim_expires_at is enough
+            # to find expired rows cheaply.
+            tx.execute(
+                """
+                CREATE INDEX IF NOT EXISTS _joblite_processing_reclaim
+                  ON _joblite_processing(queue, claim_expires_at)
+                """
+            )
+            # Inspection view: unions the three tables with a synthetic
+            # `state` column. Lets tests and tooling keep doing
+            # `SELECT state FROM _joblite_jobs ...` without knowing about
+            # the split. Not used by any hot-path code.
+            tx.execute("DROP VIEW IF EXISTS _joblite_jobs")
+            tx.execute(
+                """
+                CREATE VIEW _joblite_jobs AS
+                  SELECT id, queue, payload, 'pending' AS state, priority,
+                         run_at, NULL AS worker_id, NULL AS claim_expires_at,
+                         attempts, max_attempts, NULL AS last_error, created_at
+                    FROM _joblite_pending
+                  UNION ALL
+                  SELECT id, queue, payload, 'processing' AS state, priority,
+                         run_at, worker_id, claim_expires_at,
+                         attempts, max_attempts, NULL AS last_error, created_at
+                    FROM _joblite_processing
+                  UNION ALL
+                  SELECT id, queue, payload, 'dead' AS state, priority,
+                         run_at, NULL, NULL,
+                         attempts, max_attempts, last_error, created_at
+                    FROM _joblite_dead
+                """
+            )
+            # Clean up artifacts from previous schemas.
             tx.execute("DROP INDEX IF EXISTS _joblite_jobs_claim")
+            tx.execute("DROP INDEX IF EXISTS _joblite_jobs_claim_v2")
 
     def _channel(self) -> str:
         return f"joblite:{self.name}"
@@ -165,7 +235,7 @@ class Queue:
         if tx is not None:
             tx.execute(
                 """
-                INSERT INTO _joblite_jobs (queue, payload, run_at, priority, max_attempts)
+                INSERT INTO _joblite_pending (queue, payload, run_at, priority, max_attempts)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 params,
@@ -176,7 +246,7 @@ class Queue:
         with self.db.transaction() as own_tx:
             own_tx.execute(
                 """
-                INSERT INTO _joblite_jobs (queue, payload, run_at, priority, max_attempts)
+                INSERT INTO _joblite_pending (queue, payload, run_at, priority, max_attempts)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 params,
@@ -187,73 +257,120 @@ class Queue:
         jobs = self.claim_batch(worker_id, 1)
         return jobs[0] if jobs else None
 
+    # Columns the claim path pulls back from the pending table. Kept as a
+    # class-level tuple so both claim_batch and ack_and_claim_batch share
+    # the exact same RETURNING list.
+    _PENDING_RETURNING = (
+        "id, queue, payload, priority, run_at, max_attempts, attempts, created_at"
+    )
+
     def claim_batch(self, worker_id: str, n: int) -> list:
-        """Atomically claim up to `n` jobs in a single transaction.
+        """Atomically claim up to `n` jobs.
 
-        The SQL text is constant across batch sizes (LIMIT is parameterized)
-        so the statement cache keeps one prepared plan for every call.
-        One BEGIN IMMEDIATE + one UPDATE ... RETURNING *, independent of n.
+        DELETE-RETURNING from _joblite_pending + INSERT INTO
+        _joblite_processing, all in one transaction. If pending is empty,
+        opportunistically reclaim expired rows from processing (back to
+        processing under this worker) before returning empty.
 
-        The `state IN ('pending', 'processing')` predicate is logically a
-        no-op (the OR clause below covers it) but SQLite's planner cannot
-        otherwise prove the query implies the partial index's WHERE and
-        falls back to a full table scan. With the explicit IN the planner
-        picks the partial index and the claim goes from table scan to
-        an index lookup.
+        Hot path touches the pending index only — no state filter, no
+        partial-index predicate gymnastics, no scan past already-claimed
+        rows. Constant SQL text so `prepare_cached` hits every call.
         """
         n = int(n)
         if n <= 0:
             return []
         with self.db.transaction() as tx:
-            # Return only the fields a handler needs on the hot path.
-            # Everything else (priority, run_at, claim_expires_at,
-            # max_attempts, last_error, created_at, state) is lazy-loaded
-            # by Job via a follow-up reader query if the caller actually
-            # reads the attribute. Saves ~20% per claim on the 11-col
-            # RETURNING *.
+            rows = self._claim_inside_tx(tx, worker_id, n)
+        return [Job(self, row) for row in rows]
+
+    def _claim_inside_tx(self, tx, worker_id: str, n: int) -> list:
+        """The actual claim SQL (shared by claim_batch and
+        ack_and_claim_batch). Returns raw row dicts that have already been
+        written to _joblite_processing with this worker's metadata."""
+        # Step 1: take up to n rows out of the pending table.
+        rows = tx.query(
+            f"""
+            DELETE FROM _joblite_pending
+            WHERE id IN (
+              SELECT id FROM _joblite_pending
+              WHERE queue=? AND run_at <= unixepoch()
+              ORDER BY priority DESC, run_at ASC, id ASC
+              LIMIT ?
+            )
+            RETURNING {self._PENDING_RETURNING}
+            """,
+            [self.name, n],
+        )
+        if not rows:
+            # Step 1b (rare): queue drained — try expired-reclaim from
+            # processing. Same shape of DELETE+RETURNING, just from the
+            # other table. Re-inserted below with this worker's claim.
             rows = tx.query(
-                """
-                UPDATE _joblite_jobs
-                SET state='processing',
-                    worker_id=?,
-                    claim_expires_at=unixepoch() + ?,
-                    attempts=attempts+1
+                f"""
+                DELETE FROM _joblite_processing
                 WHERE id IN (
-                  SELECT id FROM _joblite_jobs
-                  WHERE queue=?
-                    AND state IN ('pending', 'processing')
-                    AND ((state='pending' AND run_at <= unixepoch())
-                      OR (state='processing' AND claim_expires_at < unixepoch()))
+                  SELECT id FROM _joblite_processing
+                  WHERE queue=? AND claim_expires_at < unixepoch()
                   ORDER BY priority DESC, run_at ASC, id ASC
                   LIMIT ?
                 )
-                RETURNING id, queue, payload, worker_id, attempts, claim_expires_at
+                RETURNING {self._PENDING_RETURNING}
                 """,
-                [worker_id, self.visibility_timeout_s, self.name, n],
+                [self.name, n],
             )
-        return [Job(self, row) for row in rows]
+        if not rows:
+            return []
+        # Step 2: insert each moved row into processing. One INSERT per
+        # row via `tx.execute`. The SQL text is constant, so rusqlite's
+        # prepare_cached hits on every call and the per-row cost is just
+        # a PyO3 crossing + bind + step (~5us each).
+        #
+        # Tried a `WITH moved AS (DELETE RETURNING) INSERT ... SELECT FROM
+        # moved` CTE — SQLite doesn't allow DML inside a CTE before
+        # another DML. Tried `INSERT ... SELECT FROM json_each(?)` with
+        # json_extract for each column — measured ~30% slower than the
+        # loop at batch=128 because SQLite re-parses the JSON for each
+        # `json_extract` call.
+        now = int(time.time())
+        claim_expires = now + self.visibility_timeout_s
+        insert_sql = """
+            INSERT INTO _joblite_processing
+              (id, queue, payload, priority, run_at, max_attempts,
+               attempts, created_at, worker_id, claim_expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        for r in rows:
+            tx.execute(
+                insert_sql,
+                [
+                    r["id"], r["queue"], r["payload"],
+                    r["priority"], r["run_at"], r["max_attempts"],
+                    r["attempts"] + 1, r["created_at"],
+                    worker_id, claim_expires,
+                ],
+            )
+            r["worker_id"] = worker_id
+            r["claim_expires_at"] = claim_expires
+            r["attempts"] += 1
+        return rows
 
     def ack_and_claim_batch(
         self, ack_ids, worker_id: str, n: int
     ) -> list:
         """One transaction: ack `ack_ids` (if any) then claim up to `n`
-        new jobs. Used by the async iterator to pipeline ack-of-previous
-        with claim-of-next and halve the tx count per job.
-
-        Returns the list of newly-claimed jobs. The ack is best-effort;
-        ids whose claim has since expired are quietly skipped (the
-        reclaimed-by-another-worker semantics are preserved because the
-        other worker already took the row).
+        new jobs. Used by the async iterator to pipeline the previous
+        batch's ack with the next batch's claim.
         """
         n = int(n)
         if n <= 0 and not ack_ids:
             return []
         with self.db.transaction() as tx:
             if ack_ids:
+                # ack = DELETE from processing. No state column to flip,
+                # no state='done' state to leave behind.
                 tx.execute(
                     """
-                    UPDATE _joblite_jobs
-                    SET state='done'
+                    DELETE FROM _joblite_processing
                     WHERE id IN (SELECT value FROM json_each(?))
                       AND worker_id = ?
                       AND claim_expires_at >= unixepoch()
@@ -262,44 +379,19 @@ class Queue:
                 )
             if n <= 0:
                 return []
-            rows = tx.query(
-                """
-                UPDATE _joblite_jobs
-                SET state='processing',
-                    worker_id=?,
-                    claim_expires_at=unixepoch() + ?,
-                    attempts=attempts+1
-                WHERE id IN (
-                  SELECT id FROM _joblite_jobs
-                  WHERE queue=?
-                    AND state IN ('pending', 'processing')
-                    AND ((state='pending' AND run_at <= unixepoch())
-                      OR (state='processing' AND claim_expires_at < unixepoch()))
-                  ORDER BY priority DESC, run_at ASC, id ASC
-                  LIMIT ?
-                )
-                RETURNING id, queue, payload, worker_id, attempts, claim_expires_at
-                """,
-                [worker_id, self.visibility_timeout_s, self.name, n],
-            )
+            rows = self._claim_inside_tx(tx, worker_id, n)
         return [Job(self, row) for row in rows]
 
     def ack_batch(self, job_ids, worker_id: str) -> int:
-        """Ack multiple jobs in a single transaction. Returns the count of
-        jobs whose claim was still valid (i.e. the at-least-once contract
-        is preserved for each).
-
-        Uses `json_each(?)` over a JSON array of ids so the SQL text stays
-        constant across batch sizes and hits the statement cache.
-        """
+        """Ack multiple jobs in one tx. Returns count of jobs whose claim
+        was still valid."""
         ids = [int(i) for i in job_ids]
         if not ids:
             return 0
         with self.db.transaction() as tx:
             rows = tx.query(
                 """
-                UPDATE _joblite_jobs
-                SET state='done'
+                DELETE FROM _joblite_processing
                 WHERE id IN (SELECT value FROM json_each(?))
                   AND worker_id = ?
                   AND claim_expires_at >= unixepoch()
@@ -321,8 +413,7 @@ class Queue:
         with self.db.transaction() as tx:
             rows = tx.query(
                 """
-                UPDATE _joblite_jobs
-                SET state='done'
+                DELETE FROM _joblite_processing
                 WHERE id=? AND worker_id=? AND claim_expires_at >= unixepoch()
                 RETURNING id
                 """,
@@ -331,39 +422,82 @@ class Queue:
         return len(rows) > 0
 
     def retry(self, job_id: int, worker_id: str, delay_s: int, error: str) -> bool:
+        """Move a processing row back to pending with a delayed run_at,
+        or to dead if attempts >= max_attempts. Returns True iff the
+        caller's claim was still valid.
+        """
         with self.db.transaction() as tx:
+            # DELETE RETURNING gets the row + enforces the claim window.
             rows = tx.query(
-                """
-                UPDATE _joblite_jobs
-                SET state=CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'pending' END,
-                    run_at=unixepoch() + ?,
-                    last_error=?,
-                    worker_id=NULL,
-                    claim_expires_at=NULL
+                f"""
+                DELETE FROM _joblite_processing
                 WHERE id=? AND worker_id=? AND claim_expires_at >= unixepoch()
-                RETURNING id
+                RETURNING {self._PENDING_RETURNING}
                 """,
-                [int(delay_s), error, int(job_id), worker_id],
+                [int(job_id), worker_id],
             )
-            if rows:
+            if not rows:
+                return False
+            r = rows[0]
+            if r["attempts"] >= r["max_attempts"]:
+                tx.execute(
+                    """
+                    INSERT INTO _joblite_dead
+                      (id, queue, payload, priority, run_at, max_attempts,
+                       attempts, last_error, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        r["id"], r["queue"], r["payload"], r["priority"],
+                        r["run_at"], r["max_attempts"], r["attempts"],
+                        error, r["created_at"],
+                    ],
+                )
+            else:
+                tx.execute(
+                    """
+                    INSERT INTO _joblite_pending
+                      (id, queue, payload, priority, run_at, max_attempts,
+                       attempts, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        r["id"], r["queue"], r["payload"], r["priority"],
+                        int(time.time()) + int(delay_s),
+                        r["max_attempts"], r["attempts"], r["created_at"],
+                    ],
+                )
                 tx.notify(self._channel(), "retry")
-        return len(rows) > 0
+        return True
 
     def fail(self, job_id: int, worker_id: str, error: str) -> bool:
+        """Send the job straight to dead regardless of attempts."""
         with self.db.transaction() as tx:
             rows = tx.query(
-                """
-                UPDATE _joblite_jobs
-                SET state='dead',
-                    last_error=?,
-                    worker_id=NULL,
-                    claim_expires_at=NULL
+                f"""
+                DELETE FROM _joblite_processing
                 WHERE id=? AND worker_id=? AND claim_expires_at >= unixepoch()
-                RETURNING id
+                RETURNING {self._PENDING_RETURNING}
                 """,
-                [error, int(job_id), worker_id],
+                [int(job_id), worker_id],
             )
-        return len(rows) > 0
+            if not rows:
+                return False
+            r = rows[0]
+            tx.execute(
+                """
+                INSERT INTO _joblite_dead
+                  (id, queue, payload, priority, run_at, max_attempts,
+                   attempts, last_error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    r["id"], r["queue"], r["payload"], r["priority"],
+                    r["run_at"], r["max_attempts"], r["attempts"],
+                    error, r["created_at"],
+                ],
+            )
+        return True
 
     def heartbeat(
         self, job_id: int, worker_id: str, extend_s: Optional[int] = None
@@ -372,9 +506,9 @@ class Queue:
         with self.db.transaction() as tx:
             rows = tx.query(
                 """
-                UPDATE _joblite_jobs
+                UPDATE _joblite_processing
                 SET claim_expires_at=unixepoch() + ?
-                WHERE id=? AND worker_id=? AND state='processing'
+                WHERE id=? AND worker_id=?
                 RETURNING id
                 """,
                 [extend, int(job_id), worker_id],

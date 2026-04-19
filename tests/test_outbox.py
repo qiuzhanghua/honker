@@ -29,10 +29,11 @@ async def test_outbox_delivery_called_and_acked(db_path):
         await asyncio.gather(worker, return_exceptions=True)
 
     assert [d["body"] for d in delivered] == ["1", "2"]
+    # ack DELETEs the processing row, so both jobs are gone from the view.
     rows = db.query(
-        "SELECT state FROM _joblite_jobs WHERE queue=?", ["_outbox:webhook"]
+        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["_outbox:webhook"]
     )
-    assert [r["state"] for r in rows] == ["done", "done"]
+    assert rows[0]["c"] == 0
 
 
 async def test_outbox_retries_on_exception(db_path):
@@ -59,9 +60,10 @@ async def test_outbox_retries_on_exception(db_path):
                 break
             await asyncio.sleep(0.02)
             # base_backoff 0 means retry is immediately eligible; nudge run_at
+            # on the pending table (that's where retried jobs land).
             with db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_jobs SET run_at=unixepoch() - 1 WHERE queue=?",
+                    "UPDATE _joblite_pending SET run_at=unixepoch() - 1 WHERE queue=?",
                     ["_outbox:w"],
                 )
     finally:
@@ -69,10 +71,11 @@ async def test_outbox_retries_on_exception(db_path):
         await asyncio.gather(worker, return_exceptions=True)
 
     assert len(calls) >= 3
+    # After the 3rd call succeeds and the job is ack'd, it's deleted.
     rows = db.query(
-        "SELECT state, attempts FROM _joblite_jobs WHERE queue=?", ["_outbox:w"]
+        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["_outbox:w"]
     )
-    assert rows[0]["state"] == "done"
+    assert rows[0]["c"] == 0
 
 
 async def test_outbox_rollback_drops_enqueue(db_path):
@@ -167,15 +170,17 @@ async def test_outbox_eventually_dies_after_max_attempts(db_path):
             if state and state[0]["state"] == "dead":
                 break
             await asyncio.sleep(0.02)
+            # Retried jobs live in _joblite_pending until claimed again.
             with db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_jobs SET run_at=unixepoch() - 1 WHERE queue=?",
+                    "UPDATE _joblite_pending SET run_at=unixepoch() - 1 WHERE queue=?",
                     ["_outbox:w"],
                 )
     finally:
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
 
+    # Final row lives in _joblite_dead after max_attempts reached.
     rows = db.query(
         "SELECT state, attempts, last_error FROM _joblite_jobs WHERE queue=?",
         ["_outbox:w"],
@@ -281,11 +286,12 @@ async def test_stuck_handler_past_visibility_timeout_is_reclaimed(db_path):
     # Stuck worker's ack returned False — exactly the at-least-once contract.
     assert stuck_attempted_ack == [False]
 
-    # The job is done exactly once in the DB; the fast worker's ack stuck.
+    # The job is done exactly once; ack DELETEd the processing row, so
+    # there's nothing left in any table.
     rows = db.query(
-        "SELECT state FROM _joblite_jobs WHERE queue=?", ["stuck-q"]
+        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["stuck-q"]
     )
-    assert rows[0]["state"] == "done"
+    assert rows[0]["c"] == 0
 
 
 async def test_heartbeat_prevents_reclaim_for_long_running_job(db_path):

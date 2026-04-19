@@ -23,15 +23,29 @@ Apple Silicon M-series, WAL + `synchronous=NORMAL`, release build, April 2026. M
 
 | Operation | Throughput / latency | Notes |
 |-----------|----------------------|-------|
-| `enqueue` (1 job / tx) | ~8,000 /s | `BEGIN IMMEDIATE` + INSERT (5 cols + index) + `notify` + COMMIT. WAL + `synchronous=NORMAL` (no per-commit fsync); bottleneck is PyO3+mutex+GIL per tx. |
+| `enqueue` (1 job / tx) | ~7,500 /s | `BEGIN IMMEDIATE` + INSERT into `_joblite_pending` + `notify` + COMMIT. |
 | `enqueue` (100 jobs / tx) | ~110,000 /s | Batched into one `COMMIT`. |
-| `claim + ack` (1 job direct) | ~4,500 /s | Two write transactions per job. |
-| **async iter worker loop** | **~6,500 /s** | Pipelined: one tx acks previous + claims next. p50 ~370ms per job in drain pattern. |
-| `claim_batch + ack_batch` (32) | ~75,000 /s | One tx claims 32, one tx acks them. |
-| `claim_batch + ack_batch` (128) | ~110,000 /s | Same, larger batch. |
-| `publish` (1 event / tx) | ~5,800 /s | Wider per-row cost than queue enqueue. |
+| `claim + ack` (1 job direct) | ~3,400 /s | Two write transactions per job. |
+| **async iter worker loop** | **~7,500 /s** | Pipelined: one tx acks previous + claims next. |
+| `claim_batch + ack_batch` (32) | ~65,000 /s | One tx claims 32, one tx acks them. |
+| `claim_batch + ack_batch` (128) | **~130,000 /s** | Scales independent of job history — see below. |
+| `publish` (1 event / tx) | ~5,800 /s | Stream event, wider row than queue enqueue. |
 | replay | **~1,000,000 /s** | Reader-pool `SELECT`, no write lock. |
 | live stream e2e | **p50 = 0.23ms**, p99 = 7ms | Publish to consumer wake. |
+
+### Scales with job history
+
+Tables-per-state schema means dead rows never touch the claim hot path.
+Measured with 100,000 dead rows already sitting in `_joblite_dead`:
+
+| Dead history | `claim_one + ack` | `claim_batch + ack_batch` (128) |
+|--------------|-------------------|----------------------------------|
+| 0 rows | 4,000 /s | 116,000 /s |
+| 100,000 rows | 3,500 /s | **133,000 /s** |
+
+Claim throughput is flat-to-better at scale. The claim SQL only touches
+`_joblite_pending` (which only contains claimable rows); `_joblite_dead`
+is never scanned.
 
 For context, raw Python `sqlite3` single-tx on the same file is ~47k/s (WAL ceiling on this machine). Our single-tx is ~4x slower than that because of PyO3 crossings, a writer mutex, and GIL detach/reacquire. Batching amortizes these costs and closes the gap.
 
@@ -142,7 +156,7 @@ One `Writer` slot (mutex + condvar), always released around `db.transaction()` e
 
 ### joblite
 
-- `Queue`: one row per job, claim via atomic `UPDATE ... RETURNING`, visibility-timeout reclaim. A stuck worker's `ack()` returns `False`; that's the at-least-once contract made visible.
+- `Queue`: tables-per-state schema (`_joblite_pending`, `_joblite_processing`, `_joblite_dead`). Enqueue appends to pending. Claim DELETE-RETURNINGs from pending, INSERTs into processing. Ack just DELETEs from processing. Dead rows accumulate in a separate table that never touches the claim hot path. A stuck worker's `ack()` returns `False`; at-least-once contract made visible. A `_joblite_jobs` view UNIONs the three for `SELECT state FROM _joblite_jobs` style inspection.
 - `Stream`: append-only `_joblite_stream` with monotonic offsets. `subscribe(from_offset=?)` replays then transitions to live delivery.
 - `Outbox`: side-effect delivery on `Queue` with exponential backoff.
 - `Retryable`: exception that asks for a specific retry delay.

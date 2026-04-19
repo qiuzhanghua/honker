@@ -28,8 +28,10 @@ def test_enqueue_and_claim_round_trip(db_path):
     assert job.state == "processing"
     assert job.attempts == 1
     assert job.ack() is True
+    # ack deletes the processing row; no 'done' state exists as a table.
+    # The inspection view now returns zero rows for the acked job.
     rows = db.query("SELECT state FROM _joblite_jobs WHERE id=?", [job.id])
-    assert rows[0]["state"] == "done"
+    assert rows == []
 
 
 def test_two_workers_claim_returns_exactly_one_winner(db_path):
@@ -68,7 +70,7 @@ def test_expired_claim_cannot_ack_and_is_reclaimable(db_path):
     # Simulate claim expiry by advancing claim_expires_at into the past.
     with db.transaction() as tx:
         tx.execute(
-            "UPDATE _joblite_jobs SET claim_expires_at = unixepoch() - 1 WHERE id=?",
+            "UPDATE _joblite_processing SET claim_expires_at = unixepoch() - 1 WHERE id=?",
             [job.id],
         )
 
@@ -190,9 +192,10 @@ def test_delayed_run_at_not_claimed_until_due(db_path):
     assert q.claim_one("w") is None
 
     # Rewrite run_at to the past via direct SQL to avoid real sleep.
+    # The pending job lives in _joblite_pending; UPDATE there.
     with db.transaction() as tx:
         tx.execute(
-            "UPDATE _joblite_jobs SET run_at=unixepoch() - 1 WHERE payload=?",
+            "UPDATE _joblite_pending SET run_at=unixepoch() - 1 WHERE payload=?",
             ['{"n": 1}'],
         )
     j = q.claim_one("w")
@@ -210,8 +213,9 @@ def test_max_attempts_transitions_to_dead(db_path):
     assert j1.retry(delay_s=0, error="try1") is True
 
     # Rewrite run_at so it's immediately claimable again.
+    # After retry the row is back in _joblite_pending.
     with db.transaction() as tx:
-        tx.execute("UPDATE _joblite_jobs SET run_at=unixepoch() - 1")
+        tx.execute("UPDATE _joblite_pending SET run_at=unixepoch() - 1")
 
     j2 = q.claim_one("w")
     assert j2.attempts == 2

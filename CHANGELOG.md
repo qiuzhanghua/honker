@@ -1,5 +1,93 @@
 # CHANGELOG
 
+## Unreleased — perf pass 5: tables-per-state schema
+
+The big structural change. `_joblite_jobs` is gone. In its place:
+`_joblite_pending`, `_joblite_processing`, `_joblite_dead`, and a
+`_joblite_jobs` **view** that UNIONs the three for inspection queries.
+
+### Why
+
+The goal was to make claim performance independent of job history size —
+so a long-running worker box doesn't slow down as dead-letter rows
+accumulate. Measured: **~132k/s batch=128 claim+ack with 100k dead rows
+in the DB, essentially unchanged from a fresh DB.** Single-table with
+partial index got most of the way there; tables-per-state gets it the
+rest of the way *and* simplifies the schema for the loadable-extension
+work coming next.
+
+### Schema
+
+- `_joblite_pending`: hot table, every enqueue appends, every claim
+  DELETEs from it. Indexed `(queue, priority DESC, run_at, id)`. No
+  state column, no partial predicate, no scanning past claimed rows.
+- `_joblite_processing`: in-flight claims. Holds worker_id,
+  claim_expires_at, attempts. Touched on claim (INSERT), ack (DELETE),
+  retry (DELETE + move to pending/dead), heartbeat (UPDATE). Only
+  scanned during the expired-reclaim fallback when pending is empty.
+- `_joblite_dead`: terminal. Never scanned on claim. Separate index
+  story if you want to aggregate dead-letter data.
+- `_joblite_jobs` view: UNION ALL of the three with synthetic `state`
+  column. Lets `SELECT state, COUNT(*) FROM _joblite_jobs` keep
+  working for inspection. Not used by any hot path.
+
+### Semantic change: `ack()` DELETEs
+
+There's no `state='done'` row after ack anymore. The row is gone from
+every table. This means:
+
+- `SELECT state FROM _joblite_jobs WHERE id=?` returns zero rows after
+  ack instead of one row with `state='done'`.
+- `SELECT COUNT(*) FROM _joblite_jobs` tracks live jobs only.
+- If you want audit history, snapshot into your own table.
+
+### Operations
+
+- `enqueue` -> INSERT into pending.
+- `claim_batch(n)` -> DELETE RETURNING n rows from pending + INSERT them
+  into processing (one INSERT per row via `prepare_cached`; tried
+  `WITH moved AS (DELETE RETURNING)` and `INSERT ... SELECT FROM
+  json_each` -- SQLite rejects the former; the latter was slower
+  because `json_extract` re-parses JSON per column per row).
+- `ack` -> DELETE from processing.
+- `retry` -> DELETE from processing + INSERT into pending (delayed
+  run_at) or into dead (attempts >= max_attempts).
+- `fail` -> DELETE from processing + INSERT into dead.
+- `heartbeat` -> UPDATE processing.
+- Expired-reclaim is opportunistic: if pending is empty, the claim
+  query falls back to DELETE RETURNING from processing where
+  `claim_expires_at < unixepoch()`. Steady-state workers never pay this
+  cost.
+
+### Numbers (median of 3, M-series, release)
+
+Fresh DB, same test shape as previous passes:
+
+| Operation | Pass 4 | Pass 5 |
+|-----------|--------|--------|
+| enqueue (1/tx) | 8.0k/s | 7.5k/s |
+| claim + ack (direct) | 4.5k/s | 3.4k/s |
+| claim_batch+ack_batch (128) | 110k/s | 100k/s |
+| **async iter end-to-end** | **6.5k/s** | **7.5k/s** |
+
+Scaling test (claim+ack on a queue with N dead rows sitting in the
+`_joblite_dead` table, same run):
+
+| Dead history | claim_one+ack | batch=128 |
+|--------------|---------------|-----------|
+| 0 rows | 4.0k/s | 116k/s |
+| 10k rows | 2.8k/s | 134k/s |
+| **100k rows** | **3.5k/s** | **133k/s** |
+
+The async-iter pattern (the worker pattern) wins measurably on fresh
+DBs and stays flat at scale. Direct `claim_one+ack` regressed ~25%
+because it's now two SQL statements per claim (DELETE + INSERT) vs the
+old single UPDATE. For real worker loops, use the iterator.
+
+All 12 Rust + 109 Python tests pass. Tests that previously did
+`UPDATE _joblite_jobs ...` now target `_joblite_pending` or
+`_joblite_processing` explicitly (views aren't updatable in SQLite).
+
 ## Unreleased — perf pass 4: pipeline ack+claim, narrow RETURNING, PRAGMA tuning
 
 Three targeted changes. Biggest win by far is the ack+claim pipeline.
