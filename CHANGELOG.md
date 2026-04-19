@@ -1,5 +1,63 @@
 # CHANGELOG
 
+## Unreleased — API simplifications: `claim()` + `subscribe()`
+
+Two sharp edges filed down based on user review.
+
+### `Queue.claim()` is one-at-a-time
+
+Previously the iterator quietly batched: `batch_size=32`, deferred
+ack into `_pending_acks`, pipelined ack-of-previous with
+claim-of-next in a single transaction, `Job.ack()` returned
+optimistic `True` before the DELETE actually ran. Users reading
+`async for job in q.claim(worker_id): handle(job); job.ack()` had
+to read the source to understand the tx model.
+
+Now each iteration is `claim_batch(worker_id, 1)` — one row, one
+write tx. `Job.ack()` is one DELETE with an honest bool return.
+Callers who want batching call `claim_batch(n)` + `ack_batch(ids)`
+themselves.
+
+Removed: `batch_size` kwarg on `claim()`, `Queue.ack_and_claim_batch()`
+helper, `Job._iter` slot and `_pending_acks` path.
+
+### `Stream.subscribe()` auto-saves offsets on a cadence
+
+Previously callers had to call `stream.save_offset(consumer, offset)`
+manually. Per-event saves add one UPSERT per event through the
+single-writer slot; forget to call them and consumers replay from 0
+every reconnect.
+
+`subscribe(consumer="c")` now auto-flushes the offset at most every
+1000 events or every 1 second, whichever first. One UPSERT per
+window, not per event — amortizes ~1000× the write traffic on hot
+streams. Override with `save_every_n=` / `save_every_s=`; set both
+to 0 to disable and save manually (e.g., atomic with a business tx).
+
+At-least-once: the save happens before yielding the next event, so
+a handler crash leaves the in-flight offset unsaved and the event
+replays on reconnect. Crash window bounded by the thresholds.
+
+Four new tests in `tests/test_stream.py` pin the behavior:
+`test_named_consumer_auto_saves_offset_every_n_events`,
+`test_named_consumer_auto_saves_offset_every_s_seconds`,
+`test_named_consumer_auto_save_disabled`,
+`test_named_consumer_crash_replays_from_last_saved_offset`.
+
+### README rewrite
+
+Dropped the Performance table (was measured against the old
+pipelined iterator; re-running would chase a moving target for a
+question the table couldn't really answer). Replaced with a one-line
+"thousands of messages/second, pointer to bench scripts."
+
+Reordered around a quick-start-first flow, added Node + extension
+code examples earlier, added a Design goals section, added a
+framework plugin walkthrough for each of FastAPI/Django/Flask, and
+a Compared-to prose section.
+
+130/130 Python + 8/8 Rust core + 8/8 Node tests pass.
+
 ## Unreleased — schema: single-table hybrid (supersedes tables-per-state)
 
 Reverted the tables-per-state split (`_joblite_pending` / `_joblite_processing`

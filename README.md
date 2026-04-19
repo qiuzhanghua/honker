@@ -4,7 +4,7 @@
 
 `joblite` adds language bindings and framework integrations that let listeners/workers consume and act on messages from `litenotify`.
 
-For most applications, [SQLite alone is sufficient](https://www.epicweb.dev/why-you-should-probably-be-using-sqlite). This project's goal is to make that easier. 
+For most applications, [SQLite alone is sufficient](https://www.epicweb.dev/why-you-should-probably-be-using-sqlite). This project's explores novel ways to make that easier. There are already great libraries that leverage SQLite for durable messaging. Huey is one; [`diskcache`](https://github.com/grantjenks/python-diskcache) is another. This is inspired by them and seeks to do something similar across languages and frameworks by moving package logic into a SQLite extension. 
 
 `litenotify` works by adding messages/tasks to tables in SQLite, similar to other task libraries that use SQLite as a durable backend. Unlike other task libraries, it takes advantage of kernel-level event notifications on SQLite's WAL file to replace a polling interval with push semantics. A 1 ms `stat(2)` thread on the WAL file turns `(size, mtime)` changes into cross-process notifications with single-digit millisecond latency.
 
@@ -17,6 +17,40 @@ This repo includes the `litenotify` SQLite loadable extension, `joblite` languag
 For Postgres-backed apps, [`pg_notify`](https://www.postgresql.org/docs/current/sql-notify.html) + [pg-boss](https://github.com/timgit/pg-boss) or [Oban](https://hexdocs.pm/oban/) is the equivalent. This library is for apps where SQLite is the primary datastore.
 
 > Experimental. API may shift before 1.0.
+
+## Features
+
+Today:
+
+- Cross-process `NOTIFY`/`LISTEN` semantics on a SQLite `.db` file with no daemon, broker, or polling loop
+- Three primitives: ephemeral pub/sub (`notify()`), durable pub/sub with per-consumer offsets (`stream()`), at-least-once work queue (`queue()`)
+- Transactional coupling by default — every primitive takes `tx=tx` and INSERTs inside the caller's transaction
+- Delayed and priority-ordered jobs (`enqueue(run_at=..., priority=...)`)
+- Retry with exponential backoff (caller-invoked) and a dead-letter table for exhausted retries
+- Visibility-timeout reclaim for crashed workers
+- Partial-index claim path — dead-row history doesn't slow down claims
+- Cross-process wake latency bounded by a 1 ms `stat(2)` poll on the `.db-wal` file
+- Shared WAL watcher per `Database` — 100 listeners = 1 stat thread
+- Auto-saving stream consumer offsets with a configurable flush interval
+- SQLite loadable extension (`.so`/`.dylib`) exposing the same tables to any SQLite client
+- Python binding (PyO3), Node.js binding (napi-rs)
+- Framework plugins: FastAPI, Django, Flask
+- Tested end-to-end across languages (Python writes, Node reads via the same `.db-wal`)
+
+On the [ROADMAP](ROADMAP.md):
+
+- Crontab / periodic tasks (`@periodic_task(crontab(...))`)
+- Handler timeout (`@task(timeout=N)`) — wall-clock bound on handler execution
+- Declarative retries (`@task(retries=3, retry_delay=60, backoff=2.0)`)
+- Task expiration (`@task(expires=60)`) — drop unclaimed jobs after a TTL
+- Task locking (`with queue.lock('name')`) — only-one-at-a-time patterns
+- Rate-limiting (`@task(rate_limit=(10, 60))`)
+- Task result storage (`job.result(timeout=...)`) — fetch the handler's return value
+- Go and Ruby bindings; Express and Rails framework plugins
+- `joblite-node` TypeScript port of the higher-level Queue/Stream/Outbox API
+- Experimental `sqlite-loadable-rs` build exposing a `litenotify_get_fd()` fd-based wake for host-language async runtimes
+
+Deliberately out of scope (at least for now): task pipelines/chains/groups/chords, multi-writer replication, workflow orchestration with DAGs.
 
 ## Design
 

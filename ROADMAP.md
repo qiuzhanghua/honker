@@ -58,20 +58,79 @@
 
 ## Next (post-correctness-push)
 
-- **Refactor `litenotify` loadable extension toward a pure
+### Task queue features (huey parity, minus pipelines)
+
+Ordered by value / effort. The "value" column is my best guess at
+how often the feature actually matters in real workloads.
+
+- [ ] **Handler timeout.** Wrap each handler call in
+  `asyncio.wait_for(handler(...), timeout=N)` inside the three
+  framework plugins. Closes a real correctness hole: today a hung
+  handler gets its claim expired after `visibility_timeout_s` and
+  another worker picks up the same job, so side effects can fire
+  twice while the first handler is still running. `@task(timeout=N)`
+  as the declarative shape. ~15 min per plugin.
+- [ ] **`delay=` kwarg on `enqueue`.** Sugar for
+  `run_at=int(time.time()) + delay`. Today callers have to compute
+  the absolute timestamp; this is the shorthand everyone expects.
+  ~5 min.
+- [ ] **Declarative retries.** `@task(retries=3, retry_delay=60,
+  backoff=2.0)` in plugin decorators. Worker catches exceptions from
+  the handler and calls `job.retry(delay_s=retry_delay * backoff**n,
+  error=str(e))` automatically. Plugins already do ad-hoc
+  `try/except: job.retry(60)` — this lifts it to declarative config.
+  ~30 min.
+- [ ] **Crontab / periodic tasks.** `@periodic_task(crontab(minute='0',
+  hour='3'))`. A scheduler process (dedicated CLI or in-process
+  background task) enqueues periodic tasks at their cron boundaries.
+  Needs: a crontab parser (either vendor from croniter or a minimal
+  built-in), a scheduler loop that wakes at the next boundary and
+  calls `enqueue`, and a way to avoid double-firing across multiple
+  scheduler processes (simplest: leader election via an
+  `INSERT OR IGNORE` on a `_joblite_scheduler_lock` row with TTL).
+  ~4 hours.
+- [ ] **Task expiration.** `@task(expires=60)` — if a job isn't
+  claimed within 60 seconds of enqueue, drop it. Add
+  `expires_at INTEGER` column; claim predicate filters
+  `expires_at IS NULL OR expires_at > unixepoch()`; a sweep SQL
+  moves expired-pending rows to `_joblite_dead` (or just DELETEs).
+  ~1 hour.
+- [ ] **Task locking.** `with queue.lock('name'): ...` — acquire a
+  named lock before running, skip (or block) if it's held. Used for
+  "only one of these at a time" cron-like patterns.
+  `_joblite_locks(name PRIMARY KEY, owner, expires_at)` table,
+  acquire = `INSERT OR IGNORE` with TTL check, release = `DELETE`.
+  ~1 hour.
+- [ ] **Rate-limiting.** `@task(rate_limit=(10, 60))` — at most 10
+  invocations per 60 seconds. Implementation: sliding-window counter
+  in `_joblite_rate_limits`, claim-path CHECK. ~2 hours.
+- [ ] **Task result storage.** `job.result(timeout=...)` returns the
+  handler's return value. New `_joblite_results(id, value, expires_at)`
+  table, worker UPSERTs on success, caller polls (or awaits a WAL
+  wake, then SELECTs). TTL prune. Opens the door to
+  pipelines/chains/groups later if anyone asks, but keep those
+  **out of scope for v1** — they add real complexity for limited
+  real-world use. ~1 day.
+
+### Bindings + framework plugins
+
+- [ ] **Refactor `litenotify` loadable extension toward a pure
   `sqlite-loadable-rs` build exposing `litenotify_get_fd()`** — a
   host-language-async-friendly alternative to stat-polling, letting
   runtimes `await` on a commit-hook fd without any poll loop.
   Separate track from the current stat-poll watcher (which stays
   as the cross-platform baseline).
-- **`joblite-node`**: a TypeScript port of `joblite.Queue` / `Stream`
-  / `Outbox` built on `@litenotify/node`. Makes the cross-language
-  story symmetric.
-- **`joblite-express`**: Express middleware wrapping
-  `@litenotify/node` + a TypeScript `Queue` — SSE endpoint, worker
+- [ ] **`joblite-node`**: TypeScript port of `joblite.Queue` /
+  `Stream` / `Outbox` built on `@litenotify/node`. Symmetrizes the
+  cross-language story.
+- [ ] **`joblite-express`**: Express middleware wrapping
+  `@litenotify/node` + a TypeScript `Queue`. SSE endpoint, worker
   pool, `authorize` hook.
-- **Go and Ruby bindings**. Go via cgo over a C ABI that
+- [ ] **Go and Ruby bindings**. Go via cgo over a C ABI that
   `litenotify-core` would export; Ruby via magnus.
+- [ ] **Rails plugin** once the Ruby binding lands. Same shape as
+  FastAPI/Django/Flask: SSE endpoints, `authorize` hook, task
+  decorator.
 
 ## 1.0 release prep (separate milestone)
 
