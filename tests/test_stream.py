@@ -1,4 +1,4 @@
-"""Tests for joblite.stream."""
+"""Tests for honker.stream."""
 
 import asyncio
 

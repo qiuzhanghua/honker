@@ -3,7 +3,7 @@ binding must agree on schema and ack semantics. Root-caused an earlier
 bug where the extension had a 6-column ``_honker_dead`` while Python
 expected 10, and where ``honker_ack_batch`` UPDATEd rows to state='done'
 while Python DELETEd them. Both now share
-``litenotify-core::bootstrap_joblite_schema`` and both DELETE on ack.
+``honker-core::bootstrap_honker_schema`` and both DELETE on ack.
 """
 
 import json
@@ -26,8 +26,8 @@ _CANDIDATES = [
 _EXT_PATH = next((p for p in _CANDIDATES if os.path.exists(p)), None)
 
 _SKIP_REASON = (
-    "litenotify-extension .dylib/.so not found under target/release — "
-    "run `cargo build -p litenotify-extension --release` first"
+    "honker-extension .dylib/.so not found under target/release — "
+    "run `cargo build -p honker-extension --release` first"
 )
 
 
@@ -43,7 +43,7 @@ def test_extension_and_python_share_schema(ext_db_path):
     had a 6-column ``_honker_dead`` and Python's ``fail()`` tripped
     on 'no column named priority'.
     """
-    # Bootstrap via the extension, then open from Python joblite.
+    # Bootstrap via the extension, then open from Python honker.
     conn = sqlite3.connect(ext_db_path)
     conn.enable_load_extension(True)
     conn.load_extension(_EXT_PATH)
@@ -80,7 +80,7 @@ def test_extension_honker_ack_deletes_row(ext_db_path):
     rather than UPDATE ``state='done'`` and leave it in ``_honker_live``
     forever.
     """
-    # Enqueue via Python joblite.
+    # Enqueue via Python honker.
     db = honker.open(ext_db_path)
     q = db.queue("ext-ack")
     q.enqueue({"i": 1})
@@ -161,7 +161,7 @@ def test_extension_sweep_expired_moves_to_dead(ext_db_path):
     `expires_at <= unixepoch()`, insert them into `_honker_dead`
     with `last_error='expired'`.
     """
-    # Seed via Python joblite so we know the enqueue path is honest.
+    # Seed via Python honker so we know the enqueue path is honest.
     db = honker.open(ext_db_path)
     q = db.queue("exp-ext")
     q.enqueue({"i": 1}, expires=-1)
@@ -356,7 +356,7 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
     """`honker_scheduler_register` inserts a task row; `honker_scheduler_tick`
     fires due boundaries and advances `next_fire_at`."""
     conn = _open_ext(ext_db_path)
-    # Install the schema (bootstrap_joblite runs on first register
+    # Install the schema (bootstrap_honker runs on first register
     # through bootstrap — but the ext path bootstraps lazily when
     # honker.open() is called; for a pure-ext session we call the
     # bootstrap scalar explicitly).
@@ -525,7 +525,7 @@ def test_extension_result_interops_with_python(ext_db_path):
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_enqueue_returns_id_and_fires_notify(ext_db_path):
     """`honker_enqueue` INSERTs a row, returns its id, and pushes a
-    'new' notification on `joblite:<queue>` so waiting workers wake.
+    'new' notification on `honker:<queue>` so waiting workers wake.
     """
     conn = _open_ext(ext_db_path)
     # Seven args: queue, payload, run_at_or_null, delay_or_null,

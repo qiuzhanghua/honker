@@ -41,7 +41,7 @@ PACKAGES_ROOT = os.path.join(REPO_ROOT, "packages")
 
 def seed_pending(db_path: str, queue: str, n: int) -> None:
     """Pre-seed `n` claimable jobs so workers can drain without live enqueue
-    contention. Bypasses the joblite Python layer for speed."""
+    contention. Bypasses the honker Python layer for speed."""
     if n <= 0:
         return
     import sqlite3
@@ -67,11 +67,11 @@ def seed_pending(db_path: str, queue: str, n: int) -> None:
 def seed_dead(db_path: str, n: int) -> None:
     """Insert `n` fake dead rows directly via sqlite3 to stand in for
     historical job volume. Grows the DB file without going through the
-    joblite Python layer."""
+    honker Python layer."""
     import sqlite3
     import honker
 
-    # Let joblite init the schema first.
+    # Let honker init the schema first.
     db = honker.open(db_path)
     db.queue("hist")
     del db

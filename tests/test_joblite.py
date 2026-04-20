@@ -1,4 +1,4 @@
-"""Tests for the joblite Python package.
+"""Tests for the honker Python package.
 
 Covers the six must-pass tests from PLAN.md plus ordering, delayed run_at,
 max_attempts→dead, rollback-drops-enqueue, and worker-wakes-on-NOTIFY.

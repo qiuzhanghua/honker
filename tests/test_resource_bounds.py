@@ -13,7 +13,7 @@ import os
 import threading
 import time
 
-import honker as litenotify
+import honker
 
 
 def _active_thread_count() -> int:
@@ -28,7 +28,7 @@ def _active_thread_count() -> int:
 async def test_listener_churn_does_not_leak_threads(db_path):
     """Create 300 listeners back to back; consume one event each; drop.
     Thread count at the end must be near the baseline."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
 
     baseline = _active_thread_count()
     peak = baseline
@@ -71,7 +71,7 @@ async def test_listener_churn_does_not_leak_threads(db_path):
 async def test_many_simultaneous_listeners_bounded_thread_count(db_path):
     """Hold 100 concurrent listeners alive, verify thread count ~= baseline + 100,
     then drop them all and verify we return to baseline."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     baseline = _active_thread_count()
 
     # Hold listeners alive by keeping references in a list; start the bridge
@@ -126,7 +126,7 @@ async def test_sustained_honk_throughput_does_not_leak_memory(db_path):
     is a full BEGIN IMMEDIATE + COMMIT round trip (~ms), and holding the writer
     per honk would starve the consumer on the same event loop.
     """
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     got: list = []
     n_events = 1000
 

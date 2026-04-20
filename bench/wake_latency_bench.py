@@ -39,7 +39,7 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKAGES_ROOT = os.path.join(REPO_ROOT, "packages")
-# Let `python bench/wake_latency_bench.py` find the in-repo joblite
+# Let `python bench/wake_latency_bench.py` find the in-repo honker
 # package without needing `pip install -e`.
 if PACKAGES_ROOT not in sys.path:
     sys.path.insert(0, PACKAGES_ROOT)

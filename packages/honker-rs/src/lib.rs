@@ -55,7 +55,7 @@ impl Database {
         let conn = honker_core::open_conn(&path_str, true)
             .map_err(|e| Error::Core(e.to_string()))?;
         honker_core::attach_honker_functions(&conn)?;
-        honker_core::bootstrap_joblite_schema(&conn)
+        honker_core::bootstrap_honker_schema(&conn)
             .map_err(|e| Error::Core(e.to_string()))?;
         Ok(Self { conn })
     }

@@ -10,7 +10,7 @@
     "*.node"
   ],
   "napi": {
-    "binaryName": "litenotify",
+    "binaryName": "honker",
     "targets": [
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",

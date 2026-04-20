@@ -8,7 +8,7 @@ const path = require('node:path');
 const lit = require('..');
 
 function tmpdb() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'litenotify-node-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'honker-node-'));
   return { path: path.join(dir, 't.db'), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 

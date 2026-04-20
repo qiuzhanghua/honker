@@ -58,7 +58,7 @@ fn json_to_sql(v: &JsonValue) -> SqlValue {
         }
         JsonValue::String(s) => SqlValue::Text(s.clone()),
         // Objects/arrays are SQL-serialized as JSON text, consistent with
-        // how joblite.Queue.enqueue(payload) treats dicts/lists.
+        // how honker.Queue.enqueue(payload) treats dicts/lists.
         JsonValue::Array(_) | JsonValue::Object(_) => SqlValue::Text(v.to_string()),
     }
 }

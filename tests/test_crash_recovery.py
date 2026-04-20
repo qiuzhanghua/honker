@@ -215,18 +215,18 @@ def test_sigkill_mid_honk_tx_delivers_no_notification(tmp_path):
     channel = f"crash-channel-{os.getpid()}-{time.time_ns()}"
 
     # Create the file so subprocess can open immediately.
-    import honker as litenotify
+    import honker
 
-    seed = litenotify.open(db_path)
+    seed = honker.open(db_path)
     del seed
 
     writer_script = textwrap.dedent(
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import honker as litenotify
+        import honker
 
-        db = litenotify.open({db_path!r})
+        db = honker.open({db_path!r})
         with db.transaction() as tx:
             tx.notify({channel!r}, {{"killed": True}})
             print("READY", flush=True)
@@ -246,7 +246,7 @@ def test_sigkill_mid_honk_tx_delivers_no_notification(tmp_path):
 
     # Attach a fresh listener and verify it sees nothing from the killed tx
     # and that a subsequent committed honk still flows.
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     listener = db.listen(channel)
 
     async def drain_and_replay():
@@ -284,18 +284,18 @@ def test_sigkill_while_listener_preattached_sees_no_leak(tmp_path):
     db_path = str(tmp_path / "crash-preattached.db")
     channel = f"pre-{os.getpid()}-{time.time_ns()}"
 
-    import honker as litenotify
+    import honker
 
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     listener = db.listen(channel)  # pre-attached in the test process
 
     writer_script = textwrap.dedent(
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import honker as litenotify
+        import honker
 
-        db = litenotify.open({db_path!r})
+        db = honker.open({db_path!r})
         with db.transaction() as tx:
             tx.notify({channel!r}, {{"killed": True}})
             print("READY", flush=True)

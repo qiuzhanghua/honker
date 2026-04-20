@@ -2,11 +2,11 @@
 
 Compares:
   1. Raw sqlite3 + extension (single pattern per iteration):
-       SELECT jl_claim_batch(...);  SELECT jl_ack_batch(...);
+       SELECT honker_claim_batch(...);  SELECT honker_ack_batch(...);
   2. Same pattern but with a batched claim+ack per tx cycle.
   3. Same but using batch=128.
 
-Reference: how much of our Python joblite 3.4k/s ceiling is SQL+Rust
+Reference: how much of our Python honker 3.4k/s ceiling is SQL+Rust
 engine work vs PyO3/Python-loop overhead? Extension bench is the
 same SQL work via sqlite3's C extension -- much less Python overhead.
 """
@@ -21,7 +21,7 @@ EXT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "target",
     "release",
-    "liblitenotify_ext",
+    "libhonker_ext",
 )
 
 
@@ -34,7 +34,7 @@ def setup(path: str, n: int) -> sqlite3.Connection:
     conn.execute("PRAGMA cache_size=-32000")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA wal_autocheckpoint=10000")
-    conn.execute("SELECT jl_bootstrap()")
+    conn.execute("SELECT honker_bootstrap()")
     for i in range(n):
         conn.execute(
             "INSERT INTO _honker_live (queue, payload) VALUES ('bench', ?)",
@@ -50,13 +50,13 @@ def bench_single(n: int) -> float:
         processed = 0
         while processed < n:
             row = conn.execute(
-                "SELECT jl_claim_batch('bench', 'w', 1, 300)"
+                "SELECT honker_claim_batch('bench', 'w', 1, 300)"
             ).fetchone()[0]
             jobs = json.loads(row)
             if not jobs:
                 break
             ids_json = json.dumps([j["id"] for j in jobs])
-            conn.execute("SELECT jl_ack_batch(?, 'w')", (ids_json,)).fetchone()
+            conn.execute("SELECT honker_ack_batch(?, 'w')", (ids_json,)).fetchone()
             processed += len(jobs)
         dt = time.perf_counter() - start
     return processed / dt
@@ -69,14 +69,14 @@ def bench_batched(n: int, batch: int) -> float:
         processed = 0
         while processed < n:
             row = conn.execute(
-                "SELECT jl_claim_batch('bench', 'w', ?, 300)",
+                "SELECT honker_claim_batch('bench', 'w', ?, 300)",
                 (batch,),
             ).fetchone()[0]
             jobs = json.loads(row)
             if not jobs:
                 break
             ids_json = json.dumps([j["id"] for j in jobs])
-            conn.execute("SELECT jl_ack_batch(?, 'w')", (ids_json,)).fetchone()
+            conn.execute("SELECT honker_ack_batch(?, 'w')", (ids_json,)).fetchone()
             processed += len(jobs)
         dt = time.perf_counter() - start
     return processed / dt

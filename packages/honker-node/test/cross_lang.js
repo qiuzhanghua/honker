@@ -3,8 +3,8 @@
 // Three scenarios:
 //   1. Python writes → Node reads (walEvents + SELECT)
 //   2. Node writes → Python reads (listen() iterator)
-//   3. Schema compat: Python bootstraps joblite tables, Node sees
-//      them via raw SQL (Node binding doesn't expose jl_* functions —
+//   3. Schema compat: Python bootstraps honker tables, Node sees
+//      them via raw SQL (Node binding doesn't expose honker_* functions —
 //      it's the `honker` binding — but the shared _honker_
  //      _notifications + _honker_* tables are interoperable.)
 const test = require('node:test');
@@ -91,7 +91,7 @@ with db.transaction() as tx:
 });
 
 // Reverse direction: Node is the writer, Python subscribes via
-// joblite's Listener. Python's Listener starts from MAX(id) at
+// honker's Listener. Python's Listener starts from MAX(id) at
 // construction — if Node wrote before Python subscribed, those
 // events would be skipped. So Python signals READY on stdout
 // before Node commits.
@@ -218,7 +218,7 @@ asyncio.run(main())
  // them via raw SQL. Proves the tables aren't PyO3-gated —
  // on-disk format is language-neutral.
 test(
-  'python bootstraps joblite schema; node reads tables via raw SQL',
+  'python bootstraps honker schema; node reads tables via raw SQL',
   async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlang-schema-'));
     const dbPath = path.join(dir, 't.db');
@@ -264,7 +264,7 @@ print("DONE", flush=True)
       );
       assert.equal(payloads[0].from, 'python');
 
-      // Verify every BOOTSTRAP_JOBLITE_SQL table is present from
+      // Verify every BOOTSTRAP_HONKER_SQL table is present from
       // Node's perspective too — catches a binding-gated bootstrap.
       const tableNames = db
         .query(

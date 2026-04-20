@@ -1,7 +1,7 @@
 # Benchmarks
 
 ```bash
-uv run python bench/joblite_bench.py --n 5000
+uv run python bench/honker_bench.py --n 5000
 uv run python bench/stream_bench.py --n 5000
 ```
 
@@ -9,7 +9,7 @@ uv run python bench/stream_bench.py --n 5000
 
 Median of 3 runs. WAL + `synchronous=NORMAL`, default `busy_timeout=5000`.
 
-### `joblite.queue`
+### `honker.queue`
 
 ```
 enqueue (1 job / tx):                   6,000 ops/s   (~170us/job)
@@ -25,7 +25,7 @@ The async iterator (`async for job in queue.claim(worker_id)`) uses
 `claim_batch(batch_size=32)` internally; application code gets the
 60k number unchanged.
 
-### `joblite.stream`
+### `honker.stream`
 
 ```
 publish (1 / tx):                       5,800 events/s

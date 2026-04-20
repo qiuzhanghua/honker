@@ -158,7 +158,7 @@ pub fn attach_notify(conn: &Connection) -> Result<(), Error> {
 /// Idempotent (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT
 /// EXISTS`). Views and schema-version cleanup live in the language
 /// binding, not here — they're caller-specific.
-pub const BOOTSTRAP_JOBLITE_SQL: &str = "
+pub const BOOTSTRAP_HONKER_SQL: &str = "
     CREATE TABLE IF NOT EXISTS _honker_live (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       queue TEXT NOT NULL,
@@ -231,10 +231,10 @@ pub const BOOTSTRAP_JOBLITE_SQL: &str = "
     );
 ";
 
-/// Install the joblite queue schema on `conn`. Idempotent. See
-/// [`BOOTSTRAP_JOBLITE_SQL`] for the DDL and rationale.
-pub fn bootstrap_joblite_schema(conn: &Connection) -> Result<(), Error> {
-    conn.execute_batch(BOOTSTRAP_JOBLITE_SQL)?;
+/// Install the honker queue schema on `conn`. Idempotent. See
+/// [`BOOTSTRAP_HONKER_SQL`] for the DDL and rationale.
+pub fn bootstrap_honker_schema(conn: &Connection) -> Result<(), Error> {
+    conn.execute_batch(BOOTSTRAP_HONKER_SQL)?;
     Ok(())
 }
 
@@ -674,12 +674,12 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_joblite_schema_creates_tables_and_index() {
+    fn bootstrap_honker_schema_creates_tables_and_index() {
         let conn = mem();
-        bootstrap_joblite_schema(&conn).unwrap();
+        bootstrap_honker_schema(&conn).unwrap();
 
         // Idempotent.
-        bootstrap_joblite_schema(&conn).unwrap();
+        bootstrap_honker_schema(&conn).unwrap();
 
         // _honker_live has the 12 columns we expect (Python binding
         // and the extension have historically disagreed on _honker_dead

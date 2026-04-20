@@ -1,7 +1,7 @@
 //! 5-field crontab parser + next-fire calculator.
 //!
-//! Exposed as `jl_cron_next_after(expr, from_unix) -> next_unix` via
-//! `attach_joblite_functions`. One implementation for every binding —
+//! Exposed as `honker_cron_next_after(expr, from_unix) -> next_unix` via
+//! `attach_honker_functions`. One implementation for every binding —
 //! the Python `CronSchedule` class collapses to a marker holding the
 //! expression string.
 //!

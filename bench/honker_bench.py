@@ -1,4 +1,4 @@
-"""Throughput + latency benchmark for joblite.
+"""Throughput + latency benchmark for honker.
 
 Measures:
 - enqueue ops/s (producer side)
@@ -6,7 +6,7 @@ Measures:
 - end-to-end enqueue -> handler p50/p99 latency (async worker)
 
 Usage:
-    uv run python bench/joblite_bench.py [--n 10000] [--workers 1]
+    uv run python bench/honker_bench.py [--n 10000] [--workers 1]
 """
 
 import argparse

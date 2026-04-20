@@ -1,10 +1,10 @@
 """Schema migration tests.
 
-Users upgrading from a pre-refactor `joblite` release have a `.db`
+Users upgrading from a pre-refactor `honker` release have a `.db`
 file with old schemas on disk. Opening it with current code must
 not crash, silently corrupt data, or leave the user stuck. These
 tests build legacy schemas directly via sqlite3, then open the
-file with joblite and assert the upgrade path.
+file with honker and assert the upgrade path.
 
 What we're defending against:
   * old indexes / tables lingering and confusing the query planner,
@@ -67,7 +67,7 @@ def test_legacy_pending_processing_tables_dropped_on_open(db_path):
     raw.commit()
     raw.close()
 
-    # Open with current joblite — triggers Queue._init_schema.
+    # Open with current honker — triggers Queue._init_schema.
     db = honker.open(db_path)
     db.queue("new-queue")
 

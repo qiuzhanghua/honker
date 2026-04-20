@@ -1,19 +1,17 @@
-# litenotify/joblite
+# honker
 
-`litenotify` is a SQLite extension that adds Postgres-style `NOTIFY`/`LISTEN` semantics to SQLite with built-in durable pub/sub, task queue, and event streams without a daemon/broker or client polling.
+`honker` is a SQLite extension + language bindings that add Postgres-style `NOTIFY`/`LISTEN` semantics to SQLite, with built-in durable pub/sub, task queue, and event streams — no daemon/broker or client polling.
 
-`joblite` adds language bindings and framework integrations that let listeners/workers consume and act on messages from `litenotify`.
-
-`litenotify` works by adding messages/tasks to tables in SQLite, and takes advantage of event notifications on SQLite's WAL file to replace a polling interval with push semantics achieving cross-process notifications with single-digit millisecond latency.
+`honker` works by adding messages/tasks to tables in SQLite, and takes advantage of event notifications on SQLite's WAL file to replace a polling interval with push semantics achieving cross-process notifications with single-digit millisecond latency.
 
 > Experimental. API may change.
 
 ## At a glance
 
 ```python
-import joblite
+import honker
 
-db = joblite.open("app.db")
+db = honker.open("app.db")
 emails = db.queue("emails")
 
 # Enqueue
@@ -54,9 +52,9 @@ Today:
 Planned:
 
 - Go and Ruby bindings
-- `joblite-node` TypeScript port of the higher-level API
+- `honker-node` TypeScript port of the higher-level API
 - Framework plugins (FastAPI, Django, Flask, Express, Rails) — cut
-  for now; the core API is small enough that wiring joblite into
+  for now; the core API is small enough that wiring honker into
   your web framework is ~20 lines. See `examples/` once it lands.
 
 Deliberately out of scope: task pipelines/chains/groups/chords, multi-writer replication, workflow orchestration with DAGs.
@@ -64,14 +62,14 @@ Deliberately out of scope: task pipelines/chains/groups/chords, multi-writer rep
 ## Quick start
 
 ```bash
-pip install litenotify-joblite
+pip install honker
 ```
 
 ### Python — queue (durable at-least-once work)
 
 ```python
-import joblite
-db = joblite.open("app.db")
+import honker
+db = honker.open("app.db")
 emails = db.queue("emails")
 
 with db.transaction() as tx:
@@ -101,7 +99,7 @@ async for event in stream.subscribe(consumer="dashboard"):
     await push_to_browser(event)
 ```
 
-Each named consumer tracks its own offset in the `_joblite_stream_consumers` table. `subscribe` replays rows past the saved offset, then transitions to live delivery on WAL wake. The iterator auto-saves offset at most every 1000 events or every 1 second (whichever first) — one UPSERT per window, not per event — so a high-throughput stream doesn't hammer the single-writer slot. Override with `save_every_n=` / `save_every_s=`, or set both to 0 to disable auto-save and call `stream.save_offset(consumer, offset, tx=tx)` yourself (atomic with whatever you just did in that tx). At-least-once: a crash re-delivers in-flight events up to the last flushed offset.
+Each named consumer tracks its own offset in the `_honker_stream_consumers` table. `subscribe` replays rows past the saved offset, then transitions to live delivery on WAL wake. The iterator auto-saves offset at most every 1000 events or every 1 second (whichever first) — one UPSERT per window, not per event — so a high-throughput stream doesn't hammer the single-writer slot. Override with `save_every_n=` / `save_every_s=`, or set both to 0 to disable auto-save and call `stream.save_offset(consumer, offset, tx=tx)` yourself (atomic with whatever you just did in that tx). At-least-once: a crash re-delivers in-flight events up to the last flushed offset.
 
 ### Python — notify (ephemeral pub/sub)
 
@@ -119,7 +117,7 @@ Listeners attach at current `MAX(id)`; history is not replayed. Use `db.stream()
 ### Node.js
 
 ```js
-const lit = require('@litenotify/node');
+const lit = require('@honker/node');
 const db = lit.open('app.db');
 const tx = db.transaction();
 tx.execute('INSERT INTO orders (id) VALUES (?)', [42]);
@@ -131,7 +129,7 @@ let last = 0;
 while (running) {
   await ev.next();
   const rows = db.query(
-    'SELECT id, payload FROM _litenotify_notifications WHERE id > ? ORDER BY id', [last]);
+    'SELECT id, payload FROM _honker_notifications WHERE id > ? ORDER BY id', [last]);
   for (const r of rows) { handle(JSON.parse(r.payload)); last = r.id; }
 }
 ```
@@ -139,37 +137,37 @@ while (running) {
 ### SQLite extension (any SQLite 3.9+ client)
 
 ```sql
-.load ./liblitenotify_ext
-SELECT jl_bootstrap();
-INSERT INTO _joblite_live (queue, payload) VALUES ('emails', '{"to":"alice"}');
-SELECT jl_claim_batch('emails', 'worker-1', 32, 300);    -- JSON array
-SELECT jl_ack_batch('[1,2,3]', 'worker-1');              -- DELETEs; returns count
-SELECT jl_sweep_expired('emails');                       -- count moved to dead
-SELECT jl_lock_acquire('backup', 'me', 60);              -- 1 = got it, 0 = held
-SELECT jl_lock_release('backup', 'me');                  -- 1 = released
-SELECT jl_rate_limit_try('api', 10, 60);                 -- 1 = under, 0 = at limit
-SELECT jl_rate_limit_sweep(3600);                        -- drop windows >1h old
-SELECT jl_cron_next_after('0 3 * * *', unixepoch());     -- unix ts of next fire
-SELECT jl_scheduler_register('nightly', 'backups',
+.load ./libhonker_ext
+SELECT honker_bootstrap();
+INSERT INTO _honker_live (queue, payload) VALUES ('emails', '{"to":"alice"}');
+SELECT honker_claim_batch('emails', 'worker-1', 32, 300);    -- JSON array
+SELECT honker_ack_batch('[1,2,3]', 'worker-1');              -- DELETEs; returns count
+SELECT honker_sweep_expired('emails');                       -- count moved to dead
+SELECT honker_lock_acquire('backup', 'me', 60);              -- 1 = got it, 0 = held
+SELECT honker_lock_release('backup', 'me');                  -- 1 = released
+SELECT honker_rate_limit_try('api', 10, 60);                 -- 1 = under, 0 = at limit
+SELECT honker_rate_limit_sweep(3600);                        -- drop windows >1h old
+SELECT honker_cron_next_after('0 3 * * *', unixepoch());     -- unix ts of next fire
+SELECT honker_scheduler_register('nightly', 'backups',
   '0 3 * * *', '"go"', 0, NULL);                         -- register periodic task
-SELECT jl_scheduler_tick(unixepoch());                   -- JSON: fires due
-SELECT jl_scheduler_soonest();                           -- min next_fire_at
-SELECT jl_scheduler_unregister('nightly');               -- 1 = deleted
-SELECT jl_stream_publish('orders', 'k', '{"id":42}');    -- returns offset
-SELECT jl_stream_read_since('orders', 0, 1000);          -- JSON array
-SELECT jl_stream_save_offset('worker', 'orders', 42);    -- monotonic upsert
-SELECT jl_stream_get_offset('worker', 'orders');         -- offset or 0
-SELECT jl_result_save(42, '{"ok":true}', 3600);          -- save w/ 1h TTL
-SELECT jl_result_get(42);                                -- value or NULL
-SELECT jl_result_sweep();                                -- prune expired
+SELECT honker_scheduler_tick(unixepoch());                   -- JSON: fires due
+SELECT honker_scheduler_soonest();                           -- min next_fire_at
+SELECT honker_scheduler_unregister('nightly');               -- 1 = deleted
+SELECT honker_stream_publish('orders', 'k', '{"id":42}');    -- returns offset
+SELECT honker_stream_read_since('orders', 0, 1000);          -- JSON array
+SELECT honker_stream_save_offset('worker', 'orders', 42);    -- monotonic upsert
+SELECT honker_stream_get_offset('worker', 'orders');         -- offset or 0
+SELECT honker_result_save(42, '{"ok":true}', 3600);          -- save w/ 1h TTL
+SELECT honker_result_get(42);                                -- value or NULL
+SELECT honker_result_sweep();                                -- prune expired
 SELECT notify('orders', '{"id":42}');
 ```
 
-The extension shares `_joblite_live`, `_joblite_dead`, and `_litenotify_notifications` with the Python binding, so a Python worker can claim jobs any other language pushed via the extension. Schema compatibility is pinned by `tests/test_extension_interop.py`.
+The extension shares `_honker_live`, `_honker_dead`, and `_honker_notifications` with the Python binding, so a Python worker can claim jobs any other language pushed via the extension. Schema compatibility is pinned by `tests/test_extension_interop.py`.
 
 ## Design
 
-This repo includes the `litenotify` SQLite loadable extension and `joblite` language bindings for Python and Node today, with Go/Rust/Ruby planned. Framework-integration plugins (FastAPI/Django/Flask) were cut for now — the core API is small enough that wiring joblite into your web framework is ~20 lines per framework, and we prefer to keep that surface as cookbook examples rather than maintained packages until a real user needs something different.
+This repo includes the `honker` SQLite loadable extension and `honker` language bindings for Python and Node today, with Go/Rust/Ruby planned. Framework-integration plugins (FastAPI/Django/Flask) were cut for now — the core API is small enough that wiring honker into your web framework is ~20 lines per framework, and we prefer to keep that surface as cookbook examples rather than maintained packages until a real user needs something different.
 
 For most applications, [SQLite alone is sufficient](https://www.epicweb.dev/why-you-should-probably-be-using-sqlite). There are already great libraries that leverage SQLite for durable messaging. [Huey](https://github.com/coleifer/huey) is one; [`diskcache`](https://github.com/grantjenks/python-diskcache) is another. This project is inspired by them and seeks to do something similar across languages and frameworks by moving package logic into a SQLite extension.
 
@@ -201,15 +199,15 @@ The library/extension is a small coordination layer built on the properties of S
 
 Idle cost is a single `stat(2)` per millisecond per database — no SQL, no page-cache pressure, no writer-lock contention. Listener count scales for free because the wake signal is a file stat, not a query.
 
-`SharedWalWatcher` (in `litenotify-core`) owns the poll thread and fans out to N subscribers via bounded `SyncSender<()>` channels keyed by subscriber id. Each `db.wal_events()` call registers a subscriber and returns a handle whose `Drop` auto-unsubscribes, so a dropped listener causes the bridge thread's `rx.recv() -> Err` and exits cleanly.
+`SharedWalWatcher` (in `honker-core`) owns the poll thread and fans out to N subscribers via bounded `SyncSender<()>` channels keyed by subscriber id. Each `db.wal_events()` call registers a subscriber and returns a handle whose `Drop` auto-unsubscribes, so a dropped listener causes the bridge thread's `rx.recv() -> Err` and exits cleanly.
 
 ### Queue schema
 
-- `_joblite_live`: pending + processing rows
+- `_honker_live`: pending + processing rows
 - Partial index: `(queue, priority DESC, run_at, id) WHERE state IN ('pending','processing')`
 - Claim = one `UPDATE … RETURNING` via that index
 - Ack = one `DELETE`
-- Retry-exhausted → `_joblite_dead` (never scanned by claim path)
+- Retry-exhausted → `_honker_dead` (never scanned by claim path)
 
 Partial-index on state means the claim hot path is bounded by the *working-set* size, not the *history* size. A queue with 100k dead rows claims as fast as a queue with zero.
 
@@ -224,7 +222,7 @@ For batched work, call `claim_batch(worker_id, n)` directly and ack with `queue.
 ### Transactional coupling
 
 - `notify()` is a SQL scalar function registered on the writer connection
-- INSERTs into `_litenotify_notifications` under the caller's open tx
+- INSERTs into `_honker_notifications` under the caller's open tx
 - `queue.enqueue(…, tx=tx)` and `stream.publish(…, tx=tx)` do the same
 - Rollback drops the job/event/notification with the rest of the tx
 
@@ -240,7 +238,7 @@ The library prefers waking ten listeners that don't care over missing one that d
 
 ### Retention
 
-- Queue jobs persist until ack; retry-exhausted rows move to `_joblite_dead`
+- Queue jobs persist until ack; retry-exhausted rows move to `_honker_dead`
 - Stream events persist; each named consumer tracks its own offset
 - Notify is fire-and-forget and not auto-pruned
 
@@ -250,7 +248,7 @@ The caller chooses retention per primitive. `db.prune_notifications(older_than_s
 
 - **Rollback** drops jobs/events/notifications with your business write (SQLite ACID).
 - **SIGKILL mid-tx**: safe. WAL rollback on next open leaves no stale state. Verified in `tests/test_crash_recovery.py` (subprocess killed pre-COMMIT, `PRAGMA integrity_check == 'ok'`, fresh notifies still flow).
-- **Worker crash mid-job**: the claim expires after `visibility_timeout_s` (default 300 s). Another worker reclaims; `attempts` increments. After `max_attempts` (default 3), the row moves to `_joblite_dead`.
+- **Worker crash mid-job**: the claim expires after `visibility_timeout_s` (default 300 s). Another worker reclaims; `attempts` increments. After `max_attempts` (default 3), the row moves to `_honker_dead`.
 - **Listener offline during prune**: pruned events are lost. For durable replay, use `db.stream()`, which tracks per-consumer offsets.
 
 ## Wiring into your web framework
@@ -264,7 +262,7 @@ minimal FastAPI / Django / Flask integration is ~20 lines:
 async def _start_workers():
     async def worker_loop():
         async for job in db.queue("emails").claim("worker"):
-            await joblite._worker.run_task(
+            await honker._worker.run_task(
                 job, send_email, timeout=30, retries=3, backoff=2.0
             )
     app.state._worker = asyncio.create_task(worker_loop())
@@ -290,14 +288,13 @@ Handles thousands of messages per second on a modern laptop, with cross-process 
 Layout:
 
 ```
-litenotify-core/              # Rust rlib shared across all bindings
-litenotify-extension/         # SQLite loadable extension (cdylib)
+honker-core/              # Rust rlib shared across all bindings
+honker-extension/         # SQLite loadable extension (cdylib)
 packages/
-  litenotify/                 # PyO3 Python binding
-  litenotify-node/            # napi-rs Node.js binding
-  joblite/                    # Python higher-level Queue/Stream/Outbox
-tests/                        # integration tests (cross-package)
-bench/                        # benches
+  honker/                 # Python package (PyO3 cdylib + Queue/Stream/Outbox/Scheduler)
+  honker-node/            # napi-rs Node.js binding
+tests/                    # integration tests (cross-package)
+bench/                    # benches
 ```
 
 Each `packages/*` directory is self-contained (own `Cargo.toml` / `pyproject.toml` / `package.json`) and is intended to become its own repository published as a git submodule into this directory. Today it lives inline for fast iteration while the APIs settle.
@@ -320,11 +317,11 @@ One-time: `make install-coverage-deps` (installs `coverage.py` + `cargo-llvm-cov
 
 ```bash
 make coverage               # both HTML reports into coverage/
-make coverage-python        # joblite + litenotify python paths
-make coverage-rust          # litenotify-core Rust unit tests
+make coverage-python        # honker python paths
+make coverage-rust          # honker-core Rust unit tests
 ```
 
-Python coverage reflects the full joblite test suite (~92% of `packages/joblite/`). Rust coverage reflects only `cargo test` — many `joblite_ops.rs` paths (`jl_enqueue`, `jl_claim_batch`, etc.) are only exercised via the Python test suite and won't show up in the Rust report. Combined cross-language coverage is non-trivial (LLVM profile-data merging across PyO3 boundaries) and is deferred.
+Python coverage reflects the full honker test suite (~92% of `packages/honker/`). Rust coverage reflects only `cargo test` — many `honker_ops.rs` paths (`honker_enqueue`, `honker_claim_batch`, etc.) are only exercised via the Python test suite and won't show up in the Rust report. Combined cross-language coverage is non-trivial (LLVM profile-data merging across PyO3 boundaries) and is deferred.
 
 ## License
 

@@ -278,6 +278,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "honker-node"
+version = "0.1.0"
+dependencies = [
+ "honker-core",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "parking_lot",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -344,20 +358,6 @@ dependencies = [
  "quote",
  "syn",
  "vcpkg",
-]
-
-[[package]]
-name = "litenotify-node"
-version = "0.1.0"
-dependencies = [
- "honker-core",
- "napi",
- "napi-build",
- "napi-derive",
- "parking_lot",
- "rusqlite",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

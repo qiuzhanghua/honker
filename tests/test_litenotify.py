@@ -1,4 +1,4 @@
-"""Tests for the litenotify Python binding.
+"""Tests for the honker Python binding.
 
 Covers: param type fidelity, connection pool release under success/rollback/
 exception, listener channel isolation, fanout, slow-listener non-blocking,
@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-import honker as litenotify
+import honker
 
 
 def _make_table(db):
@@ -26,7 +26,7 @@ def _make_table(db):
 
 
 def test_param_type_fidelity_round_trips(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     with db.transaction() as tx:
         tx.execute(
@@ -48,7 +48,7 @@ def test_param_type_fidelity_round_trips(db_path):
 
 def test_integer_comparisons_not_string_coerced(db_path):
     """Regression: params were stringified, which broke numeric comparisons."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     with db.transaction() as tx:
         tx.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, ts INTEGER)")
         for ts in [10, 2, 100, 20]:
@@ -58,7 +58,7 @@ def test_integer_comparisons_not_string_coerced(db_path):
 
 
 def test_unsupported_param_type_raises(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     with pytest.raises(TypeError):
         with db.transaction() as tx:
@@ -66,7 +66,7 @@ def test_unsupported_param_type_raises(db_path):
 
 
 async def test_listen_emits_only_matching_channel(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     got = []
@@ -94,7 +94,7 @@ async def test_listen_emits_only_matching_channel(db_path):
 
 
 async def test_multiple_listeners_same_channel_all_receive(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     async def collect(n_expected):
@@ -119,7 +119,7 @@ async def test_multiple_listeners_same_channel_all_receive(db_path):
 
 
 async def test_rollback_drops_notification(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     got = []
@@ -149,12 +149,12 @@ async def test_notify_payload_round_trips_common_json_shapes(db_path):
     """tx.notify must JSON-encode any JSON-serializable value and the
     receiver's Notification.payload must decode it identically. Matches
     Queue.enqueue and Stream.publish, plus the Node binding (see
-    litenotify-node/test/basic.js:'notify payload round-trips common
+    honker-node/test/basic.js:'notify payload round-trips common
     JSON shapes'). Pre-normalization: strings were stored raw, so
     notify("ch", "42") → int 42; notify("ch", "null") → None;
     notify("ch", '"x"') → "x" without quotes. All gone now.
     """
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     got = []
     cases = [
         {"id": 42, "name": "alice"},
@@ -184,7 +184,7 @@ async def test_notify_payload_round_trips_common_json_shapes(db_path):
 
 
 async def test_dict_and_list_payloads_json_serialized(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     got = []
 
@@ -210,7 +210,7 @@ async def test_dict_and_list_payloads_json_serialized(db_path):
 
 def test_prune_notifications_by_max_keep(db_path):
     """Pruning is user-invoked; notify() never auto-prunes."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
 
     # 100 notifications across 2 channels.
     for i in range(100):
@@ -235,7 +235,7 @@ def test_prune_notifications_by_max_keep(db_path):
 
 
 def test_prune_notifications_by_age(db_path):
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
 
     # Two old rows (created_at well in the past) and one recent.
     with db.transaction() as tx:
@@ -264,7 +264,7 @@ def test_prune_notifications_by_age(db_path):
 
 def test_prune_notifications_no_args_is_noop(db_path):
     """Calling prune with nothing configured just returns 0."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     with db.transaction() as tx:
         tx.notify("ch", "a")
     assert db.prune_notifications() == 0
@@ -274,7 +274,7 @@ def test_prune_notifications_no_args_is_noop(db_path):
 
 def test_connection_returned_on_commit_success(db_path):
     """Running many sequential transactions must not exhaust the writer slot."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     for i in range(50):
         with db.transaction() as tx:
@@ -285,7 +285,7 @@ def test_connection_returned_on_commit_success(db_path):
 
 def test_connection_returned_after_exception_in_body(db_path):
     """Regression: the writer connection was leaked when the with-body raised."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     for _ in range(20):
         with pytest.raises(ValueError):
@@ -301,7 +301,7 @@ def test_connection_returned_after_exception_in_body(db_path):
 
 def test_connection_returned_after_commit_error(db_path):
     """If COMMIT itself fails (constraint etc.) the conn is still returned."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     with db.transaction() as tx:
         tx.execute(
             """CREATE TABLE t (
@@ -330,7 +330,7 @@ async def test_slow_wal_consumer_does_not_block_writer(db_path):
     slowed. Regression against a previous design where listeners
     shared a tokio broadcast ring that could block on a full consumer.
     """
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     # One dormant listener that never consumes a WAL event. With a
@@ -355,7 +355,7 @@ async def test_slow_wal_consumer_does_not_block_writer(db_path):
 
 def test_begin_immediate_serializes_writers(db_path):
     """Two threads writing concurrently must both succeed, serialized."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     errors = []
@@ -383,7 +383,7 @@ def test_begin_immediate_serializes_writers(db_path):
 
 def test_readers_concurrent_with_writer(db_path):
     """WAL mode lets readers run while the writer holds BEGIN IMMEDIATE."""
-    db = litenotify.open(db_path, max_readers=4)
+    db = honker.open(db_path, max_readers=4)
     _make_table(db)
     with db.transaction() as tx:
         for i in range(100):
@@ -410,7 +410,7 @@ def test_readers_concurrent_with_writer(db_path):
 
 def test_query_outside_transaction_uses_reader(db_path):
     """db.query() works outside of a transaction (reader pool)."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     with db.transaction() as tx:
         tx.execute("INSERT INTO t (i) VALUES (?)", [1])
@@ -421,7 +421,7 @@ def test_query_outside_transaction_uses_reader(db_path):
 
 def test_busy_timeout_is_set(db_path):
     """PRAGMA busy_timeout=5000 must be applied on every connection."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     rows = db.query("PRAGMA busy_timeout")
     assert rows[0]["timeout"] == 5000
@@ -437,7 +437,7 @@ async def test_busy_channel_does_not_delay_quiet_channel(db_path):
     the property is load-bearing enough to guard with a test —
     a regression would break the fan-out story.
     """
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     got = []
@@ -474,7 +474,7 @@ async def test_listener_drop_allows_clean_reuse(db_path):
     must cleanly release their WAL-watcher subscriptions. Dropping a
     WalEvents now unsubscribes its channel from the shared watcher;
     the bridge thread exits on disconnect."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
 
     # Churn through 50 short-lived listeners, each consuming one event.
@@ -498,7 +498,7 @@ async def test_listener_drop_allows_clean_reuse(db_path):
 
 def test_pure_sqlite_reader_sees_committed_writes(db_path):
     """Cross-check: an independent sqlite3 client sees our writes."""
-    db = litenotify.open(db_path)
+    db = honker.open(db_path)
     _make_table(db)
     with db.transaction() as tx:
         tx.execute("INSERT INTO t (i) VALUES (?)", [7])

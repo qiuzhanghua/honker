@@ -375,13 +375,13 @@ impl Transaction {
     /// Install the canonical honker queue schema. Idempotent; the
     /// DDL lives in `honker-core` so the Python binding and the
     /// SQLite extension can't drift on column counts.
-    fn bootstrap_joblite_schema(&self) -> PyResult<()> {
+    fn bootstrap_honker_schema(&self) -> PyResult<()> {
         let state = self.inner.lock();
         let conn = state
             .conn
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Transaction not started"))?;
-        honker_core::bootstrap_joblite_schema(conn).map_err(core_err)
+        honker_core::bootstrap_honker_schema(conn).map_err(core_err)
     }
 }
 

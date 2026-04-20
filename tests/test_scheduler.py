@@ -1,9 +1,9 @@
-"""Tests for joblite.Scheduler and the Rust-backed crontab parser.
+"""Tests for honker.Scheduler and the Rust-backed crontab parser.
 
 Scheduler has two separate concerns:
   1. Cron parsing + next-boundary (pure Rust; tested via the Python
      facade). Low-level parser tests live alongside the Rust
-     implementation (`litenotify-core/src/cron.rs`); here we only
+     implementation (`honker-core/src/cron.rs`); here we only
      exercise the Python-facing API.
   2. Fire-due logic (pure — test with a mock `now`).
   3. Live scheduler loop (integration — hard to test without waiting
@@ -229,7 +229,7 @@ def test_scheduler_tick_racing_writers_produce_no_duplicates(db_path):
     """Multiple workers calling `honker_scheduler_tick` concurrently
     must never double-fire a boundary.
 
-    In production the `joblite-scheduler` leader lock gates callers —
+    In production the `honker-scheduler` leader lock gates callers —
     only one process holds it at a time. But the lock is advisory at
     the application layer; if a future binding forgets to acquire
     it, or a test misuses the API, the underlying SQL must still be
@@ -330,7 +330,7 @@ async def test_scheduler_run_with_stop_event(db_path):
 
     # Scheduler acquired + released the lock cleanly.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='joblite-scheduler'"
+        "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='honker-scheduler'"
     )
     assert rows[0]["c"] == 0
 
@@ -368,6 +368,6 @@ def test_scheduler_run_noop_without_tasks(db_path):
     asyncio.run(sched.run())
     # Lock never acquired.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='joblite-scheduler'"
+        "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='honker-scheduler'"
     )
     assert rows[0]["c"] == 0

@@ -189,14 +189,13 @@ class Queue:
         self._init_schema()
 
     def _init_schema(self):
-        # Canonical DDL lives in honker-core::BOOTSTRAP_JOBLITE_SQL
+        # Canonical DDL lives in honker-core::BOOTSTRAP_HONKER_SQL
         # so this binding and the SQLite loadable extension can't drift
         # on column counts. View + schema-version cleanup are
         # Python-binding-specific and stay here.
         with self.db.transaction() as tx:
-            tx.bootstrap_joblite_schema()
+            tx.bootstrap_honker_schema()
             # Inspection view: UNION live + dead with a synthetic `state`.
-            tx.execute("DROP VIEW IF EXISTS _joblite_jobs")
             tx.execute("DROP VIEW IF EXISTS _honker_jobs")
             tx.execute(
                 """
@@ -233,7 +232,7 @@ class Queue:
         expires: Optional[float] = None,
     ) -> int:
         """Insert one job row. Returns the inserted `id` (primary key
-        in `_joblite_live`). Delegates to `honker_enqueue`, which handles
+        in `_honker_live`). Delegates to `honker_enqueue`, which handles
         run_at / delay precedence + expires computation + firing the
         wake notification atomically in Rust — same SQL path every
         binding uses.
@@ -244,7 +243,7 @@ class Queue:
           - neither:   now (claimable immediately)
 
         `expires`: seconds from now. Claim path filters expired rows;
-        `queue.sweep_expired()` moves them into `_joblite_dead`.
+        `queue.sweep_expired()` moves them into `_honker_dead`.
 
         For bulk inserts with one commit + one cross-process wake,
         pass a shared `tx`:
@@ -319,8 +318,8 @@ class Queue:
         return _WorkerQueueIter(self, worker_id, idle_poll_s)
 
     def sweep_expired(self) -> int:
-        """Move rows whose `expires_at` has passed from `_joblite_live`
-        into `_joblite_dead` with `last_error='expired'`. The claim path
+        """Move rows whose `expires_at` has passed from `_honker_live`
+        into `_honker_dead` with `last_error='expired'`. The claim path
         already ignores expired rows, so sweep is cleanup-only — not
         correctness-critical. Call on a schedule if you enqueue jobs
         with `expires=` and want to reclaim the table space.
@@ -530,7 +529,7 @@ class Stream:
     def __init__(self, db, name: str):
         self.db = db
         self.name = name
-        # _joblite_stream + _joblite_stream_consumers ship in
+        # _honker_stream + _honker_stream_consumers ship in
         # BOOTSTRAP_JOBLITE_SQL, so no per-Stream DDL needed — the
         # tables already exist by the time Database wraps the
         # connection.
@@ -593,7 +592,7 @@ class Stream:
         the last saved offset for that consumer is used.
 
         When `consumer` is set, the iterator auto-saves offset to
-        `_joblite_stream_consumers` on a cadence: at most every
+        `_honker_stream_consumers` on a cadence: at most every
         `save_every_n` yielded events or every `save_every_s` seconds,
         whichever comes first. This amortizes the offset-save write
         across many events — critical because every `save_offset` is
@@ -646,7 +645,7 @@ class _StreamIter:
         self._save_every_n = max(0, save_every_n)
         self._save_every_s = max(0.0, save_every_s)
         # Highest offset yielded that hasn't been flushed to
-        # _joblite_stream_consumers yet. Flushed on threshold crossing
+        # _honker_stream_consumers yet. Flushed on threshold crossing
         # inside __anext__, before yielding the next event.
         self._pending_save_offset = 0
         self._events_since_save = 0
@@ -789,7 +788,7 @@ class LockHeld(Exception):
 class _Lock:
     """Context manager returned by `Database.lock(name, ttl=60)`.
 
-    Acquires the named lock in `_joblite_locks` via `INSERT OR IGNORE`.
+    Acquires the named lock in `_honker_locks` via `INSERT OR IGNORE`.
     Expired rows (owner crashed before release) are opportunistically
     pruned on every acquire attempt, so a stale lock doesn't block
     forever — the TTL is an upper bound on how long a crashed holder
@@ -843,7 +842,7 @@ class Database:
         # like db.lock() (which doesn't touch Queue or Stream) find
         # their tables on first use.
         with self._inner.transaction() as tx:
-            tx.bootstrap_joblite_schema()
+            tx.bootstrap_honker_schema()
 
     def transaction(self):
         return self._inner.transaction()

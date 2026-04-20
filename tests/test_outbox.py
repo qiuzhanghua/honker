@@ -1,4 +1,4 @@
-"""Tests for joblite.outbox."""
+"""Tests for honker.outbox."""
 
 import asyncio
 

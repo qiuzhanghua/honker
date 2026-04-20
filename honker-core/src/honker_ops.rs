@@ -1,4 +1,4 @@
-//! Rust implementations of the `jl_*` SQL scalar functions, plus a
+//! Rust implementations of the `honker_*` SQL scalar functions, plus a
 //! single `attach_honker_functions` helper that registers them on a
 //! [`rusqlite::Connection`].
 //!
@@ -8,7 +8,7 @@
 //!     SQLite client exposes the full function set.
 //!   * `packages/honker` — the PyO3 binding. Calls
 //!     `attach_honker_functions` on its writer connection so Python
-//!     can invoke `SELECT jl_*(...)` inside its own transactions
+//!     can invoke `SELECT honker_*(...)` inside its own transactions
 //!     without loading the `.dylib` at runtime.
 //!   * Future bindings (Go, Ruby, napi-rs) — load the extension via
 //!     SQLite's `sqlite3_load_extension` and get the same functions
@@ -29,7 +29,7 @@ fn to_sql_err<E: std::fmt::Display>(e: E) -> rusqlite::Error {
     )))
 }
 
-/// Register all `jl_*` joblite scalar functions on `conn`. Idempotent
+/// Register all `honker_*` honker scalar functions on `conn`. Idempotent
 /// per-connection: creating the same function twice is a rusqlite
 /// error, so call exactly once per connection.
 pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
@@ -39,7 +39,7 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
         FunctionFlags::SQLITE_UTF8,
         |ctx| {
             let db = unsafe { ctx.get_connection() }?;
-            super::bootstrap_joblite_schema(&db).map_err(to_sql_err)?;
+            super::bootstrap_honker_schema(&db).map_err(to_sql_err)?;
             Ok(1i64)
         },
     )?;
@@ -171,7 +171,7 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
     // payload into the task's queue, advances `next_fire_at` to the
     // next cron boundary, and appends `{name, queue, fire_at,
     // job_id}` to the output array. Caller typically holds
-    // `_honker_locks` entry 'joblite-scheduler' for mutual
+    // `_honker_locks` entry 'honker-scheduler' for mutual
     // exclusion across scheduler processes.
     conn.create_scalar_function(
         "honker_scheduler_tick",
