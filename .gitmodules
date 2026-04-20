@@ -4,3 +4,6 @@
 [submodule "packages/honker-go"]
 	path = packages/honker-go
 	url = git@github.com:russellromney/honker-go.git
+[submodule "packages/honker-ruby"]
+	path = packages/honker-ruby
+	url = git@github.com:russellromney/honker-ruby.git
