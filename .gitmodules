@@ -1,0 +1,3 @@
+[submodule "packages/honker-rs"]
+	path = packages/honker-rs
+	url = git@github.com:russellromney/honker-rs.git
