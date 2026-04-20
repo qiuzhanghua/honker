@@ -1,12 +1,12 @@
-//! PyO3 Python binding for litenotify.
+//! PyO3 Python binding for honker.
 //!
 //! This crate is thin: it owns Python-flavored types (Database,
 //! Transaction, WalEvents pyclasses), marshals Python dict/list/bytes
 //! to rusqlite params, and materializes rows into Python dicts. All
 //! the SQLite plumbing — connection opening, PRAGMAs, the notify()
-//! SQL function + notifications table, the writer/readers pools, the
-//! WAL-file watcher thread — lives in [`litenotify_core`] and is
-//! shared with the other bindings (cdylib extension, napi-rs Node).
+ //! SQL function + notifications table, the writer/readers pools, the
+ //! WAL-file watcher thread — lives in [`honker_core`] and is
+ //! shared with the other bindings (cdylib extension, napi-rs Node).
 
 use honker_core::{Readers, SharedWalWatcher, Writer, open_conn};
 use parking_lot::Mutex;
@@ -154,10 +154,10 @@ impl Database {
     #[pyo3(signature = (path, max_readers=8))]
     fn new(path: String, max_readers: usize) -> PyResult<Self> {
         // Writer conn registers the notify() SQL function + ensures
-        // _litenotify_notifications exists. Readers just SELECT.
+        // _honker_notifications exists. Readers just SELECT.
         let writer_conn = open_conn(&path, true).map_err(core_err)?;
-        // Also register every `jl_*` SQL function on the writer
-        // connection so Python can call `SELECT jl_foo(...)` inside
+        // Also register every `honker_*` SQL function on the writer
+        // connection so Python can call `SELECT honker_foo(...)` inside
         // its own transactions — same implementations the loadable
         // extension registers, no `.dylib` load needed at runtime.
         honker_core::attach_honker_functions(&writer_conn)
@@ -372,8 +372,8 @@ impl Transaction {
         Ok(id)
     }
 
-    /// Install the canonical joblite queue schema. Idempotent; the
-    /// DDL lives in `litenotify-core` so the Python binding and the
+    /// Install the canonical honker queue schema. Idempotent; the
+    /// DDL lives in `honker-core` so the Python binding and the
     /// SQLite extension can't drift on column counts.
     fn bootstrap_joblite_schema(&self) -> PyResult<()> {
         let state = self.inner.lock();
@@ -437,7 +437,7 @@ impl WalEvents {
         let rx = state.rx.take().expect("wal rx already taken");
 
         std::thread::Builder::new()
-            .name("litenotify-wal-bridge".into())
+            .name("honker-wal-bridge".into())
             .spawn(move || {
                 // Blocks on the subscriber channel. Exits when the
                 // shared watcher's sender list prunes this subscriber
@@ -497,7 +497,7 @@ fn open(path: String, max_readers: usize) -> PyResult<Database> {
 /// Compute the next unix timestamp strictly after `from_unix` that
 /// matches `expr`, at minute precision, in the system local time zone.
 /// Pure function — no database needed. Raises `ValueError` on a
-/// malformed cron expression. Used by `joblite.CronSchedule` so the
+/// malformed cron expression. Used by `honker.CronSchedule` so the
 /// parser + next-boundary math lives once in Rust.
 #[pyfunction]
 fn cron_next_after(expr: String, from_unix: i64) -> PyResult<i64> {
@@ -506,7 +506,7 @@ fn cron_next_after(expr: String, from_unix: i64) -> PyResult<i64> {
 }
 
 #[pymodule]
-fn litenotify(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _honker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(cron_next_after, m)?)?;
     m.add_class::<Database>()?;

@@ -37,7 +37,7 @@ def setup(path: str, n: int) -> sqlite3.Connection:
     conn.execute("SELECT jl_bootstrap()")
     for i in range(n):
         conn.execute(
-            "INSERT INTO _joblite_live (queue, payload) VALUES ('bench', ?)",
+            "INSERT INTO _honker_live (queue, payload) VALUES ('bench', ?)",
             (f'{{"i":{i}}}',),
         )
     return conn

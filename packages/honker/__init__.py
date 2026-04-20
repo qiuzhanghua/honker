@@ -1,4 +1,4 @@
-from joblite.joblite import (
+from honker._honker import (
     Database,
     Event,
     Job,
@@ -11,7 +11,7 @@ from joblite.joblite import (
     Stream,
     open,
 )
-from joblite._scheduler import (
+from honker._scheduler import (
     CronSchedule,
     Scheduler,
     crontab,

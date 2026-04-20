@@ -6,11 +6,14 @@ import uuid
 from collections import deque
 from typing import Any, AsyncIterator, Callable, Optional
 
-import litenotify
+
+def _core_open(path, max_readers):
+    from _honker_native import open as _open
+    return _open(path, max_readers=max_readers)
 
 
 class Notification:
-    """A single row from `_litenotify_notifications`, as delivered to a
+    """A single row from `_honker_notifications`, as delivered to a
     `Listener`. `payload` is lazy-decoded JSON on access — matches the
     `Job.payload` convention."""
 
@@ -68,7 +71,7 @@ class Listener:
         # Skip anything that existed before this Listener started.
         rows = db.query(
             "SELECT COALESCE(MAX(id), 0) AS m "
-            "FROM _litenotify_notifications WHERE channel=?",
+            "FROM _honker_notifications WHERE channel=?",
             [channel],
         )
         self._last_seen = int(rows[0]["m"]) if rows else 0
@@ -83,7 +86,7 @@ class Listener:
                 return self._buffer.popleft()
             rows = self.db.query(
                 "SELECT id, channel, payload, created_at "
-                "FROM _litenotify_notifications "
+                "FROM _honker_notifications "
                 "WHERE channel=? AND id > ? ORDER BY id",
                 [self.channel, self._last_seen],
             )
@@ -186,7 +189,7 @@ class Queue:
         self._init_schema()
 
     def _init_schema(self):
-        # Canonical DDL lives in litenotify-core::BOOTSTRAP_JOBLITE_SQL
+        # Canonical DDL lives in honker-core::BOOTSTRAP_JOBLITE_SQL
         # so this binding and the SQLite loadable extension can't drift
         # on column counts. View + schema-version cleanup are
         # Python-binding-specific and stay here.
@@ -194,30 +197,31 @@ class Queue:
             tx.bootstrap_joblite_schema()
             # Inspection view: UNION live + dead with a synthetic `state`.
             tx.execute("DROP VIEW IF EXISTS _joblite_jobs")
+            tx.execute("DROP VIEW IF EXISTS _honker_jobs")
             tx.execute(
                 """
-                CREATE VIEW _joblite_jobs AS
+                CREATE VIEW _honker_jobs AS
                   SELECT id, queue, payload, state, priority, run_at,
                          worker_id, claim_expires_at,
                          attempts, max_attempts, NULL AS last_error, created_at
-                    FROM _joblite_live
+                    FROM _honker_live
                   UNION ALL
                   SELECT id, queue, payload, 'dead' AS state, priority,
                          run_at, NULL, NULL,
                          attempts, max_attempts, last_error, created_at
-                    FROM _joblite_dead
+                    FROM _honker_dead
                 """
             )
             # Clean up artifacts from previous schema versions.
-            tx.execute("DROP INDEX IF EXISTS _joblite_jobs_claim")
-            tx.execute("DROP INDEX IF EXISTS _joblite_jobs_claim_v2")
-            tx.execute("DROP INDEX IF EXISTS _joblite_pending_claim")
-            tx.execute("DROP INDEX IF EXISTS _joblite_processing_reclaim")
-            tx.execute("DROP TABLE IF EXISTS _joblite_pending")
-            tx.execute("DROP TABLE IF EXISTS _joblite_processing")
+            tx.execute("DROP INDEX IF EXISTS _honker_jobs_claim")
+            tx.execute("DROP INDEX IF EXISTS _honker_jobs_claim_v2")
+            tx.execute("DROP INDEX IF EXISTS _honker_pending_claim")
+            tx.execute("DROP INDEX IF EXISTS _honker_processing_reclaim")
+            tx.execute("DROP TABLE IF EXISTS _honker_pending")
+            tx.execute("DROP TABLE IF EXISTS _honker_processing")
 
     def _channel(self) -> str:
-        return f"joblite:{self.name}"
+        return f"honker:{self.name}"
 
     def enqueue(
         self,
@@ -473,7 +477,7 @@ class Queue:
 class Retryable(Exception):
     """Raise from a task handler to request a scheduled retry with a specific
     delay. Any other exception is also retried, but with a generic backoff.
-    Lives in joblite core so framework plugins (fastapi, django, ...) can all
+    Lives in honker core so framework plugins (fastapi, django, ...) can all
     reuse the same signal without depending on each other."""
 
     def __init__(self, message: str = "", delay_s: int = 60):
@@ -532,7 +536,7 @@ class Stream:
         # connection.
 
     def _channel(self) -> str:
-        return f"joblite:stream:{self.name}"
+        return f"honker:stream:{self.name}"
 
     def publish(
         self, payload: Any, key: Optional[str] = None, tx=None
@@ -697,7 +701,7 @@ class _StreamIter:
 
 
 class Outbox:
-    """Transactional side-effect delivery built on joblite.queue.
+    """Transactional side-effect delivery built on honker.queue.
 
     `delivery(payload)` is a user-supplied callable (sync or async). On
     failure, the outbox retries with exponential backoff up to max_attempts
@@ -776,7 +780,7 @@ class LockHeld(Exception):
         try:
             with db.lock('nightly-backup', ttl=3600):
                 do_backup()
-        except joblite.LockHeld:
+        except honker.LockHeld:
             # another worker is already running this; skip this run
             pass
     """
@@ -828,14 +832,14 @@ class _Lock:
 
 
 class Database:
-    """Wrapper over the litenotify Database that adds queue/stream/outbox."""
+    """Wrapper over the honker Database that adds queue/stream/outbox."""
 
     def __init__(self, inner):
         self._inner = inner
         self._queues: dict = {}
         self._streams: dict = {}
         self._outboxes: dict = {}
-        # Bootstrap the shared joblite schema up-front so features
+        # Bootstrap the shared honker schema up-front so features
         # like db.lock() (which doesn't touch Queue or Stream) find
         # their tables on first use.
         with self._inner.transaction() as tx:
@@ -906,8 +910,8 @@ class Database:
         ttl: int = 60,
         owner: Optional[str] = None,
     ) -> _Lock:
-        """Named-lock context manager backed by the `_joblite_locks`
-        table. Raises `joblite.LockHeld` on `__enter__` if the lock is
+        """Named-lock context manager backed by the `_honker_locks`
+        table. Raises `honker.LockHeld` on `__enter__` if the lock is
         currently held by someone else.
 
         Typical use is around work that shouldn't overlap with itself —
@@ -916,7 +920,7 @@ class Database:
             try:
                 with db.lock('nightly-backup', ttl=3600):
                     do_backup()
-            except joblite.LockHeld:
+            except honker.LockHeld:
                 # previous run still going; skip this cron tick
                 pass
 
@@ -935,7 +939,7 @@ class Database:
         older_than_s: Optional[int] = None,
         max_keep: Optional[int] = None,
     ) -> int:
-        """Delete rows from `_litenotify_notifications`. Returns the
+        """Delete rows from `_honker_notifications`. Returns the
         number of rows removed.
 
         Provide one or both of:
@@ -970,7 +974,7 @@ class Database:
             # a max_keep larger than the current row count — both
             # devolve to "nothing qualifies for id-based deletion."
             rows = self.query(
-                "SELECT MAX(id) AS m FROM _litenotify_notifications"
+                "SELECT MAX(id) AS m FROM _honker_notifications"
             )
             max_id = rows[0]["m"] if rows and rows[0]["m"] is not None else 0
             threshold = max_id - int(max_keep)
@@ -981,7 +985,7 @@ class Database:
             return 0
         with self.transaction() as tx:
             rows = tx.query(
-                "DELETE FROM _litenotify_notifications WHERE "
+                "DELETE FROM _honker_notifications WHERE "
                 + " OR ".join(conditions)
                 + " RETURNING id",
                 params,
@@ -1038,7 +1042,7 @@ class Database:
 
 
 def open(path: str, max_readers: int = 8) -> Database:
-    return Database(litenotify.open(path, max_readers=max_readers))
+    return Database(_core_open(path, max_readers=max_readers))
 
 
 class _WorkerQueueIter:

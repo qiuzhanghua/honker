@@ -6,7 +6,7 @@ execute one claimed job. It centralizes the behaviors that the
 
   - `timeout=N`     : wall-clock bound on handler execution.
   - `retries=N`     : max attempt count before the job moves to
-                      `_joblite_dead`. If None, retry forever (up to
+                      `_honker_dead`. If None, retry forever (up to
                       the Queue's `max_attempts`).
   - `retry_delay=S` : base delay between retries, in seconds.
   - `backoff=B`     : multiplier applied per attempt — delay on attempt
@@ -24,7 +24,7 @@ import asyncio
 import traceback
 from typing import Any, Callable, Optional
 
-from joblite.joblite import Retryable
+from honker._honker import Retryable
 
 
 async def run_task(
@@ -41,14 +41,14 @@ async def run_task(
     """Execute `handler(job.payload)` with the given retry policy.
 
     On success: job.ack(). If `save_result=True`, also persists the
-    handler's return value to `_joblite_results` via
+    handler's return value to `_honker_results` via
     `queue.save_result(job.id, value, ttl=result_ttl)` before the
     ack, so a caller awaiting `queue.wait_result(job.id)` will
     receive the value on their next WAL wake.
 
     On timeout or exception: job.retry(delay) unless `retries` is set
     and the job has reached that attempt count, in which case
-    job.fail() moves the row to _joblite_dead. Results are not saved
+    job.fail() moves the row to _honker_dead. Results are not saved
     on failure — callers should treat a missing result as "did not
     complete successfully."
 

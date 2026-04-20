@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-import joblite
+import honker
 
 
 def _rss_bytes() -> int:
@@ -41,7 +41,7 @@ async def test_60s_sustained_notify_no_rss_growth(db_path):
     notifications are never auto-pruned; this test also prunes on
     its own to isolate *library* growth from test-data growth).
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     # Warm up: open connections + register functions + stabilize
     # allocator state before baseline.
@@ -121,7 +121,7 @@ def test_wal_bounded_under_sustained_writes(db_path):
     under 80 MB (auto-checkpoint threshold is 10k * 4096 B ≈ 40 MB,
     double for headroom).
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("wal-soak")
 
     N = 20_000

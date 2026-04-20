@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-import joblite as litenotify
+import honker as litenotify
 
 
 def _make_table(db):
@@ -218,7 +218,7 @@ def test_prune_notifications_by_max_keep(db_path):
             tx.notify("ch", f"n{i}")
 
     before = db.query(
-        "SELECT COUNT(*) AS c FROM _litenotify_notifications"
+        "SELECT COUNT(*) AS c FROM _honker_notifications"
     )[0]["c"]
     assert before == 100, (
         f"notify() must not auto-prune; expected 100 rows, got {before}"
@@ -229,7 +229,7 @@ def test_prune_notifications_by_max_keep(db_path):
     assert deleted == 90
 
     after = db.query(
-        "SELECT COUNT(*) AS c FROM _litenotify_notifications"
+        "SELECT COUNT(*) AS c FROM _honker_notifications"
     )[0]["c"]
     assert after == 10
 
@@ -240,11 +240,11 @@ def test_prune_notifications_by_age(db_path):
     # Two old rows (created_at well in the past) and one recent.
     with db.transaction() as tx:
         tx.execute(
-            "INSERT INTO _litenotify_notifications "
+            "INSERT INTO _honker_notifications "
             "(channel, payload, created_at) VALUES ('ch','old1', 0)",
         )
         tx.execute(
-            "INSERT INTO _litenotify_notifications "
+            "INSERT INTO _honker_notifications "
             "(channel, payload, created_at) VALUES ('ch','old2', 0)",
         )
     with db.transaction() as tx:
@@ -254,7 +254,7 @@ def test_prune_notifications_by_age(db_path):
     deleted = db.prune_notifications(older_than_s=1)
     assert deleted == 2
     rows = db.query(
-        "SELECT payload FROM _litenotify_notifications ORDER BY id"
+        "SELECT payload FROM _honker_notifications ORDER BY id"
     )
     # tx.notify now unconditionally json.dumps, so the stored payload is
     # the JSON-encoded form. json.loads recovers the original string.
@@ -268,7 +268,7 @@ def test_prune_notifications_no_args_is_noop(db_path):
     with db.transaction() as tx:
         tx.notify("ch", "a")
     assert db.prune_notifications() == 0
-    rows = db.query("SELECT COUNT(*) AS c FROM _litenotify_notifications")
+    rows = db.query("SELECT COUNT(*) AS c FROM _honker_notifications")
     assert rows[0]["c"] == 1
 
 

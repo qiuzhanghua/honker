@@ -28,10 +28,10 @@ def _run_worker_script(db_path: str, worker_id: str, n: int) -> list:
         import sys
         sys.path.insert(0, {os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packages")!r})
 
-        import joblite
+        import honker
 
         async def main():
-            db = joblite.open({db_path!r})
+            db = honker.open({db_path!r})
             q = db.queue('shared', visibility_timeout_s=30)
             processed = []
             # Drain loop: claim until None, but don't loop forever — if we
@@ -69,9 +69,9 @@ def test_two_processes_claim_exclusively(tmp_path):
     db_path = str(tmp_path / "shared.db")
 
     # Seed from a third process so both workers start cold on an existing DB.
-    import joblite
+    import honker
 
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("shared")
     n = 200
     for i in range(n):
@@ -109,9 +109,9 @@ def test_seeder_and_worker_in_separate_processes(tmp_path):
     drains, just like a real FastAPI/Django deployment."""
     db_path = str(tmp_path / "shared.db")
 
-    import joblite
+    import honker
 
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("shared")
     q.enqueue({"i": 1})
     q.enqueue({"i": 2})
@@ -129,9 +129,9 @@ def test_live_enqueuer_while_worker_drains(tmp_path):
     db_path = str(tmp_path / "shared.db")
 
     # Pre-seed a few so workers find something immediately on start.
-    import joblite
+    import honker
 
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("shared")
     for i in range(10):
         q.enqueue({"i": i})
@@ -141,8 +141,8 @@ def test_live_enqueuer_while_worker_drains(tmp_path):
         f"""
         import sys, time
         sys.path.insert(0, {os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packages")!r})
-        import joblite
-        db = joblite.open({db_path!r})
+        import honker
+        db = honker.open({db_path!r})
         q = db.queue('shared')
         for i in range(10, 60):
             q.enqueue({{'i': i}})

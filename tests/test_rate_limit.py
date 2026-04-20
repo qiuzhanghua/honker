@@ -8,11 +8,11 @@ import time
 
 import pytest
 
-import joblite
+import honker
 
 
 def test_rate_limit_allows_under_limit(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     # 5 calls in the same 60s window should all pass.
     for _ in range(5):
@@ -20,7 +20,7 @@ def test_rate_limit_allows_under_limit(db_path):
 
 
 def test_rate_limit_rejects_over_limit(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     # Fill the window.
     for _ in range(3):
@@ -35,19 +35,19 @@ def test_rate_limit_rejected_call_not_counted(db_path):
     counter. Otherwise a hot loop of rejected calls would inflate the
     count past the limit.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     for _ in range(3):
         db.try_rate_limit("api", limit=3, per=60)
     # Hammer it with rejections.
     for _ in range(100):
         assert db.try_rate_limit("api", limit=3, per=60) is False
 
-    rows = db.query("SELECT count FROM _joblite_rate_limits WHERE name='api'")
+    rows = db.query("SELECT count FROM _honker_rate_limits WHERE name='api'")
     assert rows[0]["count"] == 3
 
 
 def test_rate_limit_different_names_independent(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     # Fill 'api' but not 'email'.
     for _ in range(2):
@@ -59,7 +59,7 @@ def test_rate_limit_different_names_independent(db_path):
 
 
 def test_rate_limit_invalid_args_raises(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     with pytest.raises(ValueError):
         db.try_rate_limit("x", limit=0, per=60)
@@ -76,7 +76,7 @@ def test_rate_limit_window_advances(db_path):
     Test is slow-ish (waits out a window) but doesn't depend on
     mocking time.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     assert db.try_rate_limit("slow", limit=1, per=1) is True
     assert db.try_rate_limit("slow", limit=1, per=1) is False
 
@@ -90,12 +90,12 @@ def test_rate_limit_window_advances(db_path):
 
 
 def test_sweep_rate_limits_removes_old_windows(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     # Manually insert a stale row far in the past.
     with db.transaction() as tx:
         tx.execute(
-            "INSERT INTO _joblite_rate_limits (name, window_start, count) "
+            "INSERT INTO _honker_rate_limits (name, window_start, count) "
             "VALUES ('old', unixepoch() - 100000, 5)",
         )
     # And a fresh one from try_rate_limit.
@@ -106,6 +106,6 @@ def test_sweep_rate_limits_removes_old_windows(db_path):
     assert deleted == 1
 
     remaining = db.query(
-        "SELECT name FROM _joblite_rate_limits ORDER BY name"
+        "SELECT name FROM _honker_rate_limits ORDER BY name"
     )
     assert [r["name"] for r in remaining] == ["fresh"]

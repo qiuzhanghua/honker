@@ -13,7 +13,7 @@ import os
 import threading
 import time
 
-import joblite as litenotify
+import honker as litenotify
 
 
 def _active_thread_count() -> int:

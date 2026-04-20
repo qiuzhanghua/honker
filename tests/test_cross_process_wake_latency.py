@@ -34,9 +34,9 @@ import asyncio
 import sys
 
 sys.path.insert(0, {packages!r})
-import joblite
+import honker
 
-db = joblite.open({db_path!r})
+db = honker.open({db_path!r})
 
 
 async def main():
@@ -55,7 +55,7 @@ def _run_sample(db_path: str) -> float:
     """One wake-latency sample, in milliseconds. Returns latency from
     the parent's `tx.notify()` commit to the parent observing the
     subprocess's WAKE line."""
-    import joblite
+    import honker
 
     script = _LISTENER_SCRIPT.format(packages=PACKAGES_ROOT, db_path=db_path)
     proc = subprocess.Popen(
@@ -68,7 +68,7 @@ def _run_sample(db_path: str) -> float:
         ready = proc.stdout.readline()
         assert ready.strip() == "READY", f"listener: {ready!r}"
 
-        db = joblite.open(db_path)
+        db = honker.open(db_path)
         t0 = time.perf_counter()
         with db.transaction() as tx:
             tx.notify("wake", "ping")
@@ -89,8 +89,8 @@ def test_cross_process_wake_latency_p99_under_bound(tmp_path):
 
     # Pre-create the WAL so first-sample latency doesn't include
     # journal bootstrap.
-    import joblite
-    db = joblite.open(db_path)
+    import honker
+    db = honker.open(db_path)
     with db.transaction() as tx:
         tx.execute("CREATE TABLE _warmup (i INTEGER)")
     del db

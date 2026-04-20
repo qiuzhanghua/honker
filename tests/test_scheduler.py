@@ -17,8 +17,8 @@ from datetime import datetime
 
 import pytest
 
-import joblite
-from joblite import crontab, Scheduler
+import honker
+from honker import crontab, Scheduler
 
 
 # ---------- crontab() / CronSchedule.next_after ----------
@@ -83,16 +83,16 @@ def test_crontab_next_after_crosses_year():
 
 
 def test_scheduler_add_registers_task(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     sched = Scheduler(db)
     sched.add(
         name="nightly",
         queue="backups",
         schedule=crontab("0 3 * * *"),
     )
-    # Registration is persisted in _joblite_scheduler_tasks.
+    # Registration is persisted in _honker_scheduler_tasks.
     rows = db.query(
-        "SELECT name, queue, cron_expr FROM _joblite_scheduler_tasks "
+        "SELECT name, queue, cron_expr FROM _honker_scheduler_tasks "
         "WHERE name='nightly'"
     )
     assert len(rows) == 1
@@ -102,12 +102,12 @@ def test_scheduler_add_registers_task(db_path):
 
 
 def test_scheduler_add_replaces_by_name(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     sched = Scheduler(db)
     sched.add(name="t", queue="a", schedule=crontab("* * * * *"))
     sched.add(name="t", queue="b", schedule=crontab("* * * * *"))
     rows = db.query(
-        "SELECT queue FROM _joblite_scheduler_tasks WHERE name='t'"
+        "SELECT queue FROM _honker_scheduler_tasks WHERE name='t'"
     )
     assert len(rows) == 1
     assert rows[0]["queue"] == "b"
@@ -116,7 +116,7 @@ def test_scheduler_add_replaces_by_name(db_path):
 def test_scheduler_tick_enqueues_on_boundary(db_path):
     """honker_scheduler_tick(now) enqueues one job per registered task
     whose next_fire_at <= now, and advances next_fire_at."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("hourly-q")  # create schema
     sched = Scheduler(db)
     sched.add(
@@ -129,7 +129,7 @@ def test_scheduler_tick_enqueues_on_boundary(db_path):
     # Fetch the task's next_fire_at (set by register to the next top
     # of the hour after "now") and tick one second past it.
     row = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='hourly'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='hourly'"
     )[0]
     boundary = int(row["next_fire_at"])
     with db.transaction() as tx:
@@ -143,12 +143,12 @@ def test_scheduler_tick_enqueues_on_boundary(db_path):
     assert fires[0]["fire_at"] == boundary
     # Job landed in the queue.
     rows = db.query(
-        "SELECT payload FROM _joblite_live WHERE queue='hourly-q'"
+        "SELECT payload FROM _honker_live WHERE queue='hourly-q'"
     )
     assert len(rows) == 1
     # next_fire_at advanced one hour.
     row = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='hourly'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='hourly'"
     )[0]
     assert int(row["next_fire_at"]) == boundary + 3600
 
@@ -158,7 +158,7 @@ def test_scheduler_tick_skips_already_fired(db_path):
     next_fire_at advances past `now` on the first call, so the
     second is a no-op. Keeps scheduler restart safe within a
     boundary window."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("no-dup")
     sched = Scheduler(db)
     sched.add(
@@ -167,7 +167,7 @@ def test_scheduler_tick_skips_already_fired(db_path):
         schedule=crontab("0 * * * *"),
     )
     row = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='t'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='t'"
     )[0]
     boundary = int(row["next_fire_at"])
     with db.transaction() as tx:
@@ -180,7 +180,7 @@ def test_scheduler_tick_skips_already_fired(db_path):
         )
     assert len(json.loads(result_a[0]["j"])) == 1
     assert len(json.loads(result_b[0]["j"])) == 0
-    rows = db.query("SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='no-dup'")
+    rows = db.query("SELECT COUNT(*) AS c FROM _honker_live WHERE queue='no-dup'")
     assert rows[0]["c"] == 1
 
 
@@ -190,7 +190,7 @@ def test_scheduler_tick_catches_up_multiple_boundaries(db_path):
     unbounded — fine for low-frequency schedules; for noisy ones
     callers can use `expires` to drop stale catch-up jobs.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("catchup-q")
     sched = Scheduler(db)
     sched.add(
@@ -202,13 +202,13 @@ def test_scheduler_tick_catches_up_multiple_boundaries(db_path):
     # across 4 boundaries (the boundary we're rewinding to + 3
     # more while we sleep through now).
     row = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='h'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='h'"
     )[0]
     orig_next = int(row["next_fire_at"])
     rewound = orig_next - 4 * 3600
     with db.transaction() as tx:
         tx.execute(
-            "UPDATE _joblite_scheduler_tasks SET next_fire_at=? WHERE name='h'",
+            "UPDATE _honker_scheduler_tasks SET next_fire_at=? WHERE name='h'",
             [rewound],
         )
     # Now tick at a time slightly past the original boundary: 5
@@ -220,7 +220,7 @@ def test_scheduler_tick_catches_up_multiple_boundaries(db_path):
     assert len(fires) == 5
     # next_fire_at advanced to the hour after `now`.
     row = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='h'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='h'"
     )[0]
     assert int(row["next_fire_at"]) == orig_next + 3600
 
@@ -241,11 +241,11 @@ def test_scheduler_tick_racing_writers_produce_no_duplicates(db_path):
     boundary overdue), fire 10 Python threads each running one
     `SELECT honker_scheduler_tick(now)` through its own writer
     transaction. Exactly one thread should see the fire, nine
-    should see `[]`. The job lands in `_joblite_live` exactly once.
+    should see `[]`. The job lands in `_honker_live` exactly once.
     """
     import threading
 
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("race-q")
     sched = Scheduler(db)
     sched.add(
@@ -255,12 +255,12 @@ def test_scheduler_tick_racing_writers_produce_no_duplicates(db_path):
     )
     # Force exactly one boundary overdue.
     row = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='one'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='one'"
     )[0]
     boundary = int(row["next_fire_at"])
     with db.transaction() as tx:
         tx.execute(
-            "UPDATE _joblite_scheduler_tasks "
+            "UPDATE _honker_scheduler_tasks "
             "SET next_fire_at = ? WHERE name = 'one'",
             [boundary - 60],
         )
@@ -296,7 +296,7 @@ def test_scheduler_tick_racing_writers_produce_no_duplicates(db_path):
     )
     # And the queue has exactly one job, not ten.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='race-q'"
+        "SELECT COUNT(*) AS c FROM _honker_live WHERE queue='race-q'"
     )
     assert rows[0]["c"] == 1
 
@@ -307,7 +307,7 @@ async def test_scheduler_run_with_stop_event(db_path):
     Verifies the lock-acquire + heartbeat + stop path without needing
     to wait for real cron boundaries.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("flash")
 
     sched = Scheduler(db)
@@ -330,7 +330,7 @@ async def test_scheduler_run_with_stop_event(db_path):
 
     # Scheduler acquired + released the lock cleanly.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_locks WHERE name='joblite-scheduler'"
+        "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='joblite-scheduler'"
     )
     assert rows[0]["c"] == 0
 
@@ -339,7 +339,7 @@ async def test_two_schedulers_one_runs_one_raises_lockheld(db_path):
     """Leader election: two scheduler processes can't both hold the
     lock. The second one raises LockHeld, matching our documented
     hot-standby semantics (caller retries in a loop)."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("leader-q")
 
     s1 = Scheduler(db)
@@ -352,7 +352,7 @@ async def test_two_schedulers_one_runs_one_raises_lockheld(db_path):
     await asyncio.sleep(0.1)  # let s1 acquire the lock
 
     # s2 tries to run — the lock is held, so it raises LockHeld.
-    with pytest.raises(joblite.LockHeld):
+    with pytest.raises(honker.LockHeld):
         await s2.run()
 
     stop.set()
@@ -363,11 +363,11 @@ def test_scheduler_run_noop_without_tasks(db_path):
     """A scheduler with no tasks added returns without acquiring the
     lock — avoids blocking real schedulers that might be trying to
     hold it."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     sched = Scheduler(db)
     asyncio.run(sched.run())
     # Lock never acquired.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_locks WHERE name='joblite-scheduler'"
+        "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='joblite-scheduler'"
     )
     assert rows[0]["c"] == 0

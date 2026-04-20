@@ -49,7 +49,7 @@ test('rollback drops writes', () => {
   }
 });
 
-test('notify inserts into _litenotify_notifications and rollback drops it', () => {
+test('notify inserts into _honker_notifications and rollback drops it', () => {
   const { path: dbPath, cleanup } = tmpdb();
   try {
     const db = lit.open(dbPath);
@@ -69,7 +69,7 @@ test('notify inserts into _litenotify_notifications and rollback drops it', () =
       tx.rollback();
     }
     const rows = db.query(
-      "SELECT channel, payload FROM _litenotify_notifications WHERE channel='orders' ORDER BY id"
+      "SELECT channel, payload FROM _honker_notifications WHERE channel='orders' ORDER BY id"
     );
     assert.equal(rows.length, 1);
     assert.equal(rows[0].channel, 'orders');
@@ -98,7 +98,7 @@ test('notify payload round-trips common JSON shapes', () => {
       tx.commit();
     }
     const rows = db.query(
-      "SELECT payload FROM _litenotify_notifications WHERE channel='rt' ORDER BY id"
+      "SELECT payload FROM _honker_notifications WHERE channel='rt' ORDER BY id"
     );
     const decoded = rows.map((r) => JSON.parse(r.payload));
     assert.deepEqual(decoded, cases);
@@ -186,11 +186,11 @@ test('pruneNotifications by max_keep', () => {
       tx.notify('ch', `n${i}`);
       tx.commit();
     }
-    const before = db.query('SELECT COUNT(*) AS c FROM _litenotify_notifications');
+    const before = db.query('SELECT COUNT(*) AS c FROM _honker_notifications');
     assert.equal(before[0].c, 50);
     const deleted = db.pruneNotifications(null, 5);
     assert.equal(deleted, 45);
-    const after = db.query('SELECT COUNT(*) AS c FROM _litenotify_notifications');
+    const after = db.query('SELECT COUNT(*) AS c FROM _honker_notifications');
     assert.equal(after[0].c, 5);
   } finally {
     cleanup();

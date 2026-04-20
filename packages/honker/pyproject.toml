@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "joblite"
+name = "honker"
 version = "0.1.0"
-description = "Durable queue, stream, and cross-process pub/sub for SQLite. Built on litenotify."
+description = "Durable queue, stream, and cross-process pub/sub for SQLite. Built on honker."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Russell Romney" }]
@@ -20,13 +20,14 @@ classifiers = [
   "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
-  "litenotify>=0.1.0",
+  # honker-core is loaded as a dynamic library; no pip dep needed.
+  # The Rust cdylib (built via maturin) IS the honker package.
 ]
 
 [project.urls]
-Homepage = "https://github.com/russellromney/litenotify-joblite"
-Repository = "https://github.com/russellromney/litenotify-joblite"
+Homepage = "https://github.com/russellromney/honker"
+Repository = "https://github.com/russellromney/honker"
 
 [tool.setuptools]
-packages = ["joblite"]
-package-dir = { "joblite" = "." }
+packages = ["honker"]
+package-dir = { "honker" = "." }

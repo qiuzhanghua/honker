@@ -1,8 +1,8 @@
-//! Node binding for litenotify.
+//! Node binding for honker.
 //!
 //! Mirrors the Python API, with types tuned for JavaScript:
 //!
-//!     const lit = require('@litenotify/node');
+//!     const lit = require('@honker/node');
 //!     const db = lit.open('app.db');
 //!     const tx = db.transaction();
 //!     tx.execute('INSERT INTO orders (id) VALUES (?)', [42]);
@@ -13,7 +13,7 @@
 //!     while (running) {
 //!       await ev.next();
 //!       const rows = db.query(
-//!         'SELECT * FROM _litenotify_notifications WHERE id > ?',
+//!         'SELECT * FROM _honker_notifications WHERE id > ?',
 //!         [lastSeen]);
 //!       // ...
 //!     }
@@ -24,7 +24,7 @@
 //! arrays, and objects; objects/arrays get JSON-stringified.
 //!
 //! Writer pool, reader pool, connection open, notify() attach, and WAL
-//! file watcher all come from the shared `litenotify-core` rlib so the
+//! file watcher all come from the shared `honker-core` rlib so the
 //! PyO3, SQLite-extension, and Node bindings can't drift apart.
 
 use honker_core::{Readers, SharedWalWatcher, Writer, open_conn};
@@ -116,7 +116,7 @@ pub struct Database {
     wal_path: PathBuf,
     /// Lazy-initialized shared WAL watcher — one stat-poll thread per
     /// Database regardless of how many `walEvents()` subscribers. See
-    /// litenotify-core::SharedWalWatcher.
+    /// honker-core::SharedWalWatcher.
     shared_watcher: Arc<Mutex<Option<Arc<SharedWalWatcher>>>>,
 }
 
@@ -202,14 +202,14 @@ impl Database {
             params.push(SqlValue::Integer(secs));
         }
         if let Some(k) = max_keep {
-            conditions.push("id <= (SELECT MAX(id) - ? FROM _litenotify_notifications)");
+            conditions.push("id <= (SELECT MAX(id) - ? FROM _honker_notifications)");
             params.push(SqlValue::Integer(k));
         }
         if conditions.is_empty() {
             return Ok(0);
         }
         let sql = format!(
-            "DELETE FROM _litenotify_notifications WHERE {}",
+            "DELETE FROM _honker_notifications WHERE {}",
             conditions.join(" OR ")
         );
         let conn = self.writer.acquire();

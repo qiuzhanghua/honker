@@ -3,7 +3,7 @@ import os
 import time
 from fastapi import FastAPI
 from pydantic import BaseModel
-import joblite
+import honker
 from joblite_fastapi.joblite_fastapi import JobliteApp
 
 app = FastAPI()
@@ -11,7 +11,7 @@ app = FastAPI()
 if os.path.exists("app.db"):
     os.remove("app.db")
 
-db = joblite.open("app.db")
+db = honker.open("app.db")
 jl = JobliteApp(app, db)
 
 emails_sent = []

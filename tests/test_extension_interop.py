@@ -1,6 +1,6 @@
 """Cross-binding interop: the SQLite loadable extension and the Python
 binding must agree on schema and ack semantics. Root-caused an earlier
-bug where the extension had a 6-column ``_joblite_dead`` while Python
+bug where the extension had a 6-column ``_honker_dead`` while Python
 expected 10, and where ``honker_ack_batch`` UPDATEd rows to state='done'
 while Python DELETEd them. Both now share
 ``litenotify-core::bootstrap_joblite_schema`` and both DELETE on ack.
@@ -13,15 +13,15 @@ import sys
 
 import pytest
 
-import joblite
+import honker
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Extension filename differs by platform — look for whichever exists.
 _CANDIDATES = [
-    os.path.join(REPO_ROOT, "target", "release", "liblitenotify_ext.dylib"),
-    os.path.join(REPO_ROOT, "target", "release", "liblitenotify_ext.so"),
+    os.path.join(REPO_ROOT, "target", "release", "libhonker_ext.dylib"),
+    os.path.join(REPO_ROOT, "target", "release", "libhonker_ext.so"),
 ]
 _EXT_PATH = next((p for p in _CANDIDATES if os.path.exists(p)), None)
 
@@ -40,7 +40,7 @@ def ext_db_path(tmp_path):
 def test_extension_and_python_share_schema(ext_db_path):
     """``honker_bootstrap`` + Python's ``_init_schema`` must produce a
     schema Python can operate on without errors. The earlier extension
-    had a 6-column ``_joblite_dead`` and Python's ``fail()`` tripped
+    had a 6-column ``_honker_dead`` and Python's ``fail()`` tripped
     on 'no column named priority'.
     """
     # Bootstrap via the extension, then open from Python joblite.
@@ -51,8 +51,8 @@ def test_extension_and_python_share_schema(ext_db_path):
     conn.close()
 
     # Python side should be able to run through the full failure path
-    # (which writes into _joblite_dead) without schema errors.
-    db = joblite.open(ext_db_path)
+    # (which writes into _honker_dead) without schema errors.
+    db = honker.open(ext_db_path)
     q = db.queue("interop", max_attempts=1)
     q.enqueue({"kind": "interop"})
 
@@ -60,14 +60,14 @@ def test_extension_and_python_share_schema(ext_db_path):
     job = q.claim_one(worker)
     assert job is not None
 
-    # Explicit fail → INSERT into _joblite_dead with 10 cols. Pre-fix
+    # Explicit fail → INSERT into _honker_dead with 10 cols. Pre-fix
     # this raised "no column named priority".
     assert q.fail(job.id, worker, "forced failure for schema check")
 
     dead = db.query(
         "SELECT id, queue, payload, priority, run_at, max_attempts, "
         "attempts, last_error, created_at, died_at "
-        "FROM _joblite_dead"
+        "FROM _honker_dead"
     )
     assert len(dead) == 1
     assert dead[0]["queue"] == "interop"
@@ -77,11 +77,11 @@ def test_extension_and_python_share_schema(ext_db_path):
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_honker_ack_deletes_row(ext_db_path):
     """``honker_ack_batch`` must DELETE the row (match Python ``Queue.ack``)
-    rather than UPDATE ``state='done'`` and leave it in ``_joblite_live``
+    rather than UPDATE ``state='done'`` and leave it in ``_honker_live``
     forever.
     """
     # Enqueue via Python joblite.
-    db = joblite.open(ext_db_path)
+    db = honker.open(ext_db_path)
     q = db.queue("ext-ack")
     q.enqueue({"i": 1})
     q.enqueue({"i": 2})
@@ -107,12 +107,12 @@ def test_extension_honker_ack_deletes_row(ext_db_path):
     assert acked == 3
     conn.close()
 
-    # _joblite_live must be empty — no state='done' residue.
+    # _honker_live must be empty — no state='done' residue.
     remaining = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue = 'ext-ack'"
+        "SELECT COUNT(*) AS c FROM _honker_live WHERE queue = 'ext-ack'"
     )[0]["c"]
     assert remaining == 0, (
-        f"extension-acked rows left behind in _joblite_live (count={remaining}); "
+        f"extension-acked rows left behind in _honker_live (count={remaining}); "
         f"honker_ack_batch must DELETE, not UPDATE"
     )
 
@@ -120,7 +120,7 @@ def test_extension_honker_ack_deletes_row(ext_db_path):
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_registers_notify_function(ext_db_path):
     """Loading the extension must also register ``notify()`` + the
-    ``_litenotify_notifications`` table. The extension's docstring has
+    ``_honker_notifications`` table. The extension's docstring has
     always advertised this; earlier builds didn't actually install it.
     """
     conn = sqlite3.connect(ext_db_path)
@@ -133,7 +133,7 @@ def test_extension_registers_notify_function(ext_db_path):
     conn.execute("COMMIT")
 
     count = conn.execute(
-        "SELECT COUNT(*) FROM _litenotify_notifications WHERE channel='orders'"
+        "SELECT COUNT(*) FROM _honker_notifications WHERE channel='orders'"
     ).fetchone()[0]
     assert count == 1
 
@@ -158,11 +158,11 @@ def _open_ext(path: str):
 def test_extension_sweep_expired_moves_to_dead(ext_db_path):
     """`honker_sweep_expired(queue)` must produce the same result as
     Python's `Queue.sweep_expired()`: delete pending rows whose
-    `expires_at <= unixepoch()`, insert them into `_joblite_dead`
+    `expires_at <= unixepoch()`, insert them into `_honker_dead`
     with `last_error='expired'`.
     """
     # Seed via Python joblite so we know the enqueue path is honest.
-    db = joblite.open(ext_db_path)
+    db = honker.open(ext_db_path)
     q = db.queue("exp-ext")
     q.enqueue({"i": 1}, expires=-1)
     q.enqueue({"i": 2}, expires=-1)
@@ -179,11 +179,11 @@ def test_extension_sweep_expired_moves_to_dead(ext_db_path):
     assert moved == 2
     # Python can read the same state.
     live = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='exp-ext'"
+        "SELECT COUNT(*) AS c FROM _honker_live WHERE queue='exp-ext'"
     )[0]["c"]
     assert live == 1
     dead = db.query(
-        "SELECT payload, last_error FROM _joblite_dead "
+        "SELECT payload, last_error FROM _honker_dead "
         "WHERE queue='exp-ext' ORDER BY id"
     )
     assert len(dead) == 2
@@ -192,7 +192,7 @@ def test_extension_sweep_expired_moves_to_dead(ext_db_path):
 
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_sweep_expired_is_idempotent(ext_db_path):
-    db = joblite.open(ext_db_path)
+    db = honker.open(ext_db_path)
     q = db.queue("exp-idem")
     q.enqueue({"i": 1}, expires=-1)
 
@@ -244,7 +244,7 @@ def test_extension_lock_prunes_stale(ext_db_path):
     conn = _open_ext(ext_db_path)
     # Insert a row that expired an hour ago — simulates a crashed holder.
     conn.execute(
-        "INSERT INTO _joblite_locks (name, owner, expires_at) "
+        "INSERT INTO _honker_locks (name, owner, expires_at) "
         "VALUES ('stale', 'crashed', unixepoch() - 3600)"
     )
     conn.commit()
@@ -260,7 +260,7 @@ def test_extension_lock_prunes_stale(ext_db_path):
 def test_extension_lock_interops_with_python(ext_db_path):
     """Python's `db.lock()` and extension `honker_lock_acquire` use the
     same table. Acquiring from one side blocks the other."""
-    db = joblite.open(ext_db_path)
+    db = honker.open(ext_db_path)
     conn = _open_ext(ext_db_path)
 
     # Python holds the lock...
@@ -297,7 +297,7 @@ def test_extension_rate_limit_try(ext_db_path):
     # Count capped at 3 (rejected calls not counted).
     conn.commit()
     count = conn.execute(
-        "SELECT count FROM _joblite_rate_limits WHERE name='api'"
+        "SELECT count FROM _honker_rate_limits WHERE name='api'"
     ).fetchone()[0]
     assert count == 3
     conn.close()
@@ -307,7 +307,7 @@ def test_extension_rate_limit_try(ext_db_path):
 def test_extension_rate_limit_interops_with_python(ext_db_path):
     """Extension-side `honker_rate_limit_try` and Python's
     `db.try_rate_limit` share the same table and window."""
-    db = joblite.open(ext_db_path)
+    db = honker.open(ext_db_path)
     conn = _open_ext(ext_db_path)
 
     # Use up 2 of 3 on the Python side.
@@ -332,7 +332,7 @@ def test_extension_rate_limit_interops_with_python(ext_db_path):
 def test_extension_rate_limit_sweep(ext_db_path):
     conn = _open_ext(ext_db_path)
     conn.execute(
-        "INSERT INTO _joblite_rate_limits (name, window_start, count) "
+        "INSERT INTO _honker_rate_limits (name, window_start, count) "
         "VALUES ('old', unixepoch() - 100000, 10)"
     )
     conn.execute("SELECT honker_rate_limit_try('fresh', 10, 60)")
@@ -342,7 +342,7 @@ def test_extension_rate_limit_sweep(ext_db_path):
     conn.commit()
     assert deleted == 1
     remaining = conn.execute(
-        "SELECT name FROM _joblite_rate_limits"
+        "SELECT name FROM _honker_rate_limits"
     ).fetchall()
     assert [r[0] for r in remaining] == ["fresh"]
     conn.close()
@@ -358,7 +358,7 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
     conn = _open_ext(ext_db_path)
     # Install the schema (bootstrap_joblite runs on first register
     # through bootstrap — but the ext path bootstraps lazily when
-    # joblite.open() is called; for a pure-ext session we call the
+    # honker.open() is called; for a pure-ext session we call the
     # bootstrap scalar explicitly).
     conn.execute("SELECT honker_bootstrap()")
     conn.execute(
@@ -368,7 +368,7 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
     conn.commit()
     row = conn.execute(
         "SELECT queue, cron_expr, payload, next_fire_at "
-        "FROM _joblite_scheduler_tasks WHERE name='nightly'"
+        "FROM _honker_scheduler_tasks WHERE name='nightly'"
     ).fetchone()
     assert row[0] == "backups"
     assert row[1] == "0 3 * * *"
@@ -387,10 +387,10 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
     assert fires[0]["queue"] == "backups"
     assert fires[0]["fire_at"] == boundary
     assert conn.execute(
-        "SELECT COUNT(*) FROM _joblite_live WHERE queue='backups'"
+        "SELECT COUNT(*) FROM _honker_live WHERE queue='backups'"
     ).fetchone()[0] == 1
     new_next = int(conn.execute(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='nightly'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='nightly'"
     ).fetchone()[0])
     assert new_next == boundary + 86400
 
@@ -401,7 +401,7 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
     conn.commit()
     assert deleted == 1
     assert conn.execute(
-        "SELECT COUNT(*) FROM _joblite_scheduler_tasks"
+        "SELECT COUNT(*) FROM _honker_scheduler_tasks"
     ).fetchone()[0] == 0
     conn.close()
 
@@ -409,17 +409,17 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_scheduler_interops_with_python(ext_db_path):
     """Python `Scheduler.add` and the extension's
-    `_joblite_scheduler_tasks` write to the same table — both sides
+    `_honker_scheduler_tasks` write to the same table — both sides
     agree on the cron expression and next_fire_at."""
-    db = joblite.open(ext_db_path)
-    from joblite import Scheduler, crontab
+    db = honker.open(ext_db_path)
+    from honker import Scheduler, crontab
 
     sched = Scheduler(db)
     sched.add(name="t", queue="q", schedule=crontab("0 3 * * *"))
 
     conn = _open_ext(ext_db_path)
     row = conn.execute(
-        "SELECT queue, cron_expr FROM _joblite_scheduler_tasks WHERE name='t'"
+        "SELECT queue, cron_expr FROM _honker_scheduler_tasks WHERE name='t'"
     ).fetchone()
     assert row == ("q", "0 3 * * *")
     conn.close()
@@ -463,7 +463,7 @@ def test_extension_result_get_filters_expired(ext_db_path):
     passed (same filter semantics as Python's `get_result`)."""
     conn = _open_ext(ext_db_path)
     conn.execute(
-        "INSERT INTO _joblite_results (job_id, value, expires_at) "
+        "INSERT INTO _honker_results (job_id, value, expires_at) "
         "VALUES (7, '\"stale\"', unixepoch() - 10)"
     )
     conn.commit()
@@ -471,12 +471,12 @@ def test_extension_result_get_filters_expired(ext_db_path):
     assert conn.execute("SELECT honker_result_get(7)").fetchone()[0] is None
     # Row still present until sweep.
     assert conn.execute(
-        "SELECT COUNT(*) FROM _joblite_results"
+        "SELECT COUNT(*) FROM _honker_results"
     ).fetchone()[0] == 1
     assert conn.execute("SELECT honker_result_sweep()").fetchone()[0] == 1
     conn.commit()
     assert conn.execute(
-        "SELECT COUNT(*) FROM _joblite_results"
+        "SELECT COUNT(*) FROM _honker_results"
     ).fetchone()[0] == 0
     conn.close()
 
@@ -490,7 +490,7 @@ def test_extension_result_ttl_absolute(ext_db_path):
     conn.commit()
 
     exp = conn.execute(
-        "SELECT expires_at FROM _joblite_results WHERE job_id=1"
+        "SELECT expires_at FROM _honker_results WHERE job_id=1"
     ).fetchone()[0]
     now = conn.execute("SELECT unixepoch()").fetchone()[0]
     assert 3598 <= exp - now <= 3602
@@ -500,8 +500,8 @@ def test_extension_result_ttl_absolute(ext_db_path):
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_result_interops_with_python(ext_db_path):
     """Extension-side save is readable from Python and vice versa —
-    one `_joblite_results` table."""
-    db = joblite.open(ext_db_path)
+    one `_honker_results` table."""
+    db = honker.open(ext_db_path)
     q = db.queue("interop-results")
 
     conn = _open_ext(ext_db_path)
@@ -538,15 +538,15 @@ def test_extension_enqueue_returns_id_and_fires_notify(ext_db_path):
 
     # Row landed.
     row = conn.execute(
-        "SELECT id, queue, payload, state FROM _joblite_live"
+        "SELECT id, queue, payload, state FROM _honker_live"
     ).fetchone()
     assert row == (rid, "q", '{"x":1}', "pending")
 
     # Notify fired on the queue's channel.
     notif = conn.execute(
-        "SELECT channel, payload FROM _litenotify_notifications ORDER BY id DESC LIMIT 1"
+        "SELECT channel, payload FROM _honker_notifications ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert notif == ("joblite:q", "new")
+    assert notif == ("honker:q", "new")
     conn.close()
 
 
@@ -560,7 +560,7 @@ def test_extension_enqueue_delay_overrides_run_at(ext_db_path):
         "SELECT honker_enqueue('q', '{}', 1000, 60, 0, 3, NULL)"
     )
     conn.commit()
-    ra = conn.execute("SELECT run_at FROM _joblite_live").fetchone()[0]
+    ra = conn.execute("SELECT run_at FROM _honker_live").fetchone()[0]
     now = conn.execute("SELECT unixepoch()").fetchone()[0]
     assert 58 <= ra - now <= 62
     conn.close()
@@ -574,7 +574,7 @@ def test_extension_enqueue_expires_sets_absolute(ext_db_path):
         "SELECT honker_enqueue('q', '{}', NULL, NULL, 0, 3, 60)"
     )
     conn.commit()
-    exp = conn.execute("SELECT expires_at FROM _joblite_live").fetchone()[0]
+    exp = conn.execute("SELECT expires_at FROM _honker_live").fetchone()[0]
     now = conn.execute("SELECT unixepoch()").fetchone()[0]
     assert 58 <= exp - now <= 62
     conn.close()
@@ -604,7 +604,7 @@ def test_extension_ack_singular(ext_db_path):
     conn.commit()
     # Row gone.
     assert conn.execute(
-        "SELECT COUNT(*) FROM _joblite_live"
+        "SELECT COUNT(*) FROM _honker_live"
     ).fetchone()[0] == 0
     conn.close()
 
@@ -623,7 +623,7 @@ def test_extension_retry_flips_back_and_fires_wake(ext_db_path):
     rid = json.loads(claimed)[0]["id"]
 
     # Truncate earlier notifications so we can assert on the retry one.
-    conn.execute("DELETE FROM _litenotify_notifications")
+    conn.execute("DELETE FROM _honker_notifications")
     conn.commit()
 
     result = conn.execute(
@@ -633,7 +633,7 @@ def test_extension_retry_flips_back_and_fires_wake(ext_db_path):
     assert result == 1
 
     row = conn.execute(
-        "SELECT state, run_at, worker_id, attempts FROM _joblite_live"
+        "SELECT state, run_at, worker_id, attempts FROM _honker_live"
     ).fetchone()
     state, ra, wid, attempts = row
     assert state == "pending"
@@ -643,16 +643,16 @@ def test_extension_retry_flips_back_and_fires_wake(ext_db_path):
     assert 58 <= ra - now <= 62
 
     notif = conn.execute(
-        "SELECT channel, payload FROM _litenotify_notifications"
+        "SELECT channel, payload FROM _honker_notifications"
     ).fetchone()
-    assert notif == ("joblite:rq", "retry")
+    assert notif == ("honker:rq", "new")
     conn.close()
 
 
 @pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
 def test_extension_retry_exhausted_moves_to_dead(ext_db_path):
     """If attempts >= max_attempts at retry time, honker_retry moves the
-    row to _joblite_dead with last_error set, instead of flipping
+    row to _honker_dead with last_error set, instead of flipping
     back to pending."""
     conn = _open_ext(ext_db_path)
     # max_attempts=1 so first attempt exhausts.
@@ -671,11 +671,11 @@ def test_extension_retry_exhausted_moves_to_dead(ext_db_path):
 
     # Moved to dead.
     dead = conn.execute(
-        "SELECT id, last_error FROM _joblite_dead"
+        "SELECT id, last_error FROM _honker_dead"
     ).fetchone()
     assert dead == (rid, "gave up")
     assert conn.execute(
-        "SELECT COUNT(*) FROM _joblite_live"
+        "SELECT COUNT(*) FROM _honker_live"
     ).fetchone()[0] == 0
     conn.close()
 
@@ -698,7 +698,7 @@ def test_extension_fail_unconditional(ext_db_path):
     ).fetchone()[0] == 1
     conn.commit()
     dead = conn.execute(
-        "SELECT last_error FROM _joblite_dead"
+        "SELECT last_error FROM _honker_dead"
     ).fetchone()
     assert dead == ("explicit",)
     conn.close()
@@ -716,7 +716,7 @@ def test_extension_heartbeat_extends_claim(ext_db_path):
     conn.commit()
     rid = json.loads(claimed)[0]["id"]
     orig_exp = conn.execute(
-        "SELECT claim_expires_at FROM _joblite_live WHERE id=?", [rid]
+        "SELECT claim_expires_at FROM _honker_live WHERE id=?", [rid]
     ).fetchone()[0]
 
     # extend_s=300 pushes claim_expires_at to unixepoch() + 300.
@@ -725,7 +725,7 @@ def test_extension_heartbeat_extends_claim(ext_db_path):
     ).fetchone()[0] == 1
     conn.commit()
     new_exp = conn.execute(
-        "SELECT claim_expires_at FROM _joblite_live WHERE id=?", [rid]
+        "SELECT claim_expires_at FROM _honker_live WHERE id=?", [rid]
     ).fetchone()[0]
     assert new_exp > orig_exp
     now = conn.execute("SELECT unixepoch()").fetchone()[0]
@@ -743,7 +743,7 @@ def test_extension_enqueue_interops_with_python(ext_db_path):
     """Extension honker_enqueue and Python Queue.enqueue hit the same
     table. IDs are the same PRIMARY KEY sequence. Each side can
     claim the other's rows."""
-    db = joblite.open(ext_db_path)
+    db = honker.open(ext_db_path)
     q = db.queue("mixed")
 
     # Python enqueues.

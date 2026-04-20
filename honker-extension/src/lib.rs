@@ -2,7 +2,7 @@
 //!
 //! Thin wrapper around `honker-core`. Registers:
 //!
-//!   * `notify()` SQL scalar function + `_litenotify_notifications`
+//!   * `notify()` SQL scalar function + `_honker_notifications`
 //!     table — via `honker_core::attach_notify`.
 //!   * Every `honker_*` queue / lock / rate-limit / scheduler / result
 //!     function — via `honker_core::attach_honker_functions`.
@@ -40,7 +40,7 @@ pub unsafe extern "C" fn sqlite3_honkerext_init(
 ) -> c_int {
     unsafe {
         Connection::extension_init2(db, pz_err_msg, p_api, |conn| {
-            // notify() + _litenotify_notifications.
+            // notify() + _honker_notifications.
             honker_core::attach_notify(&conn).map_err(|e| {
                 rusqlite::Error::UserFunctionError(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,

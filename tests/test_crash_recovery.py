@@ -14,7 +14,7 @@ and verifies:
 
 Notes:
   * Notify delivery is cross-process via a shared `.db-wal`-watching
-    poll thread and the `_litenotify_notifications` table. Subscribers
+    poll thread and the `_honker_notifications` table. Subscribers
     start from `MAX(id)` at attach time, so a listener opened AFTER
     the SIGKILL-rolled-back tx correctly sees nothing from the killed
     transaction — the rolled-back INSERT never left WAL. A fresh
@@ -99,9 +99,9 @@ def test_sigkill_mid_enqueue_tx_leaves_db_clean(tmp_path):
 
     # Pre-create the schema from a normal process so the subprocess can
     # open and hold the tx quickly.
-    import joblite
+    import honker
 
-    seed = joblite.open(db_path)
+    seed = honker.open(db_path)
     seed.queue("q")
     del seed
 
@@ -109,9 +109,9 @@ def test_sigkill_mid_enqueue_tx_leaves_db_clean(tmp_path):
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import joblite
+        import honker
 
-        db = joblite.open({db_path!r})
+        db = honker.open({db_path!r})
         q = db.queue('q')
 
         # BEGIN IMMEDIATE via db.transaction(); insert a row; signal; sleep.
@@ -134,9 +134,9 @@ def test_sigkill_mid_enqueue_tx_leaves_db_clean(tmp_path):
     assert _integrity_check(db_path) == "ok"
 
     # Fresh library process: killed write did not land.
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("q")
-    existing = db.query("SELECT COUNT(*) AS c FROM _joblite_jobs")
+    existing = db.query("SELECT COUNT(*) AS c FROM _honker_jobs")
     assert existing[0]["c"] == 0, f"killed tx leaked rows: {existing}"
 
     # End-to-end round-trip works post-crash.
@@ -155,9 +155,9 @@ def test_sigkill_mid_enqueue_followed_by_concurrent_writer(tmp_path):
     automatically, but we verify it, since it's load-bearing)."""
     db_path = str(tmp_path / "crash-lock.db")
 
-    import joblite
+    import honker
 
-    seed = joblite.open(db_path)
+    seed = honker.open(db_path)
     seed.queue("q")
     del seed
 
@@ -165,9 +165,9 @@ def test_sigkill_mid_enqueue_followed_by_concurrent_writer(tmp_path):
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import joblite
+        import honker
 
-        db = joblite.open({db_path!r})
+        db = honker.open({db_path!r})
         q = db.queue('q')
         with db.transaction() as tx:
             q.enqueue({{"i": 1}}, tx=tx)
@@ -185,7 +185,7 @@ def test_sigkill_mid_enqueue_followed_by_concurrent_writer(tmp_path):
             proc.wait()
 
     start = time.time()
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("q")
     with db.transaction() as tx:
         q.enqueue({"i": 2}, tx=tx)
@@ -197,7 +197,7 @@ def test_sigkill_mid_enqueue_followed_by_concurrent_writer(tmp_path):
         f"writer blocked {elapsed:.2f}s on opening post-crash DB — "
         f"stale lock?"
     )
-    rows = db.query("SELECT COUNT(*) AS c FROM _joblite_jobs")
+    rows = db.query("SELECT COUNT(*) AS c FROM _honker_jobs")
     assert rows[0]["c"] == 1
 
 
@@ -215,7 +215,7 @@ def test_sigkill_mid_honk_tx_delivers_no_notification(tmp_path):
     channel = f"crash-channel-{os.getpid()}-{time.time_ns()}"
 
     # Create the file so subprocess can open immediately.
-    import joblite as litenotify
+    import honker as litenotify
 
     seed = litenotify.open(db_path)
     del seed
@@ -224,7 +224,7 @@ def test_sigkill_mid_honk_tx_delivers_no_notification(tmp_path):
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import joblite as litenotify
+        import honker as litenotify
 
         db = litenotify.open({db_path!r})
         with db.transaction() as tx:
@@ -284,7 +284,7 @@ def test_sigkill_while_listener_preattached_sees_no_leak(tmp_path):
     db_path = str(tmp_path / "crash-preattached.db")
     channel = f"pre-{os.getpid()}-{time.time_ns()}"
 
-    import joblite as litenotify
+    import honker as litenotify
 
     db = litenotify.open(db_path)
     listener = db.listen(channel)  # pre-attached in the test process
@@ -293,7 +293,7 @@ def test_sigkill_while_listener_preattached_sees_no_leak(tmp_path):
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import joblite as litenotify
+        import honker as litenotify
 
         db = litenotify.open({db_path!r})
         with db.transaction() as tx:

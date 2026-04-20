@@ -22,13 +22,13 @@ import time
 
 import pytest
 
-import joblite
+import honker
 
 
 def test_enqueue_throughput_floor_one_tx(db_path):
     """10,000 enqueues inside one transaction must finish in under
     3 seconds. Measured ~0.5s on M-series. A 6x slowdown trips."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("perf-enqueue")
     t0 = time.perf_counter()
     with db.transaction() as tx:
@@ -41,7 +41,7 @@ def test_enqueue_throughput_floor_one_tx(db_path):
     )
     # Sanity: rows actually landed.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='perf-enqueue'"
+        "SELECT COUNT(*) AS c FROM _honker_live WHERE queue='perf-enqueue'"
     )
     assert rows[0]["c"] == 10_000
 
@@ -52,7 +52,7 @@ def test_claim_batch_throughput_floor(db_path):
     The claim path touches the partial index on every batch; if the
     index gets dropped or the planner picks a table scan, this
     floor trips."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("perf-claim", visibility_timeout_s=300)
     with db.transaction() as tx:
         for i in range(10_000):
@@ -69,7 +69,7 @@ def test_claim_batch_throughput_floor(db_path):
     assert claimed == 10_000
     assert elapsed < 3.0, (
         f"claim_batch 10k took {elapsed:.3f}s (floor: 3.0s). "
-        f"Likely regression in the _joblite_live_claim partial index "
+        f"Likely regression in the _honker_live_claim partial index "
         f"or honker_claim_batch."
     )
 
@@ -79,7 +79,7 @@ async def test_notify_listener_receive_floor(db_path):
     1 second end-to-end. Measured ~4ms on M-series. A 250x slowdown
     trips. Catches regressions in the listener buffer, WAL watcher
     fanout, or the cross-thread asyncio.Queue bridge."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     received: list = []
     lst = db.listen("perf-notify")

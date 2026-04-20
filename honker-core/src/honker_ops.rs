@@ -3,10 +3,10 @@
 //! [`rusqlite::Connection`].
 //!
 //! Consumers:
-//!   * `litenotify-extension` — the loadable SQLite extension. Calls
-//!     `attach_honker_functions` so `.load ./liblitenotify_ext` in any
+//!   * `honker-extension` — the loadable SQLite extension. Calls
+//!     `attach_honker_functions` so `.load ./libhonker_ext` in any
 //!     SQLite client exposes the full function set.
-//!   * `packages/litenotify` — the PyO3 binding. Calls
+//!   * `packages/honker` — the PyO3 binding. Calls
 //!     `attach_honker_functions` on its writer connection so Python
 //!     can invoke `SELECT jl_*(...)` inside its own transactions
 //!     without loading the `.dylib` at runtime.
@@ -71,7 +71,7 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     conn.create_scalar_function(
-        "jl_sweep_expired",
+        "honker_sweep_expired",
         1,
         FunctionFlags::SQLITE_UTF8,
         |ctx| {
@@ -82,7 +82,7 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     conn.create_scalar_function(
-        "jl_lock_acquire",
+        "honker_lock_acquire",
         3,
         FunctionFlags::SQLITE_UTF8,
         |ctx| {
@@ -171,7 +171,7 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
     // payload into the task's queue, advances `next_fire_at` to the
     // next cron boundary, and appends `{name, queue, fire_at,
     // job_id}` to the output array. Caller typically holds
-    // `_joblite_locks` entry 'joblite-scheduler' for mutual
+    // `_honker_locks` entry 'joblite-scheduler' for mutual
     // exclusion across scheduler processes.
     conn.create_scalar_function(
         "honker_scheduler_tick",
@@ -274,7 +274,7 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
 
     // honker_retry(job_id, worker_id, delay_s, error) -> 1 if retried /
     // moved to dead, 0 if not our claim. If attempts >= max_attempts,
-    // moves the row to `_joblite_dead` instead of flipping it back
+    // moves the row to `_honker_dead` instead of flipping it back
     // to pending. Fires a notify on the queue's channel on successful
     // pending-flip (so waiting workers wake).
     conn.create_scalar_function(
@@ -336,8 +336,8 @@ pub fn attach_honker_functions(conn: &Connection) -> rusqlite::Result<()> {
         },
     )?;
 
-    // Stream functions. One impl for every binding; _joblite_stream +
-    // _joblite_stream_consumers are the shared on-disk layout.
+    // Stream functions. One impl for every binding; _honker_stream +
+    // _honker_stream_consumers are the shared on-disk layout.
 
     // honker_stream_publish(topic, key_or_null, payload_json) -> offset.
     // INSERTs one event and fires a wake on honker:stream:<topic>.
@@ -415,13 +415,13 @@ pub fn claim_batch(
     timeout_s: i64,
 ) -> rusqlite::Result<String> {
     let mut stmt = conn.prepare_cached(
-        "UPDATE _joblite_live
+        "UPDATE _honker_live
          SET state = 'processing',
              worker_id = ?1,
              claim_expires_at = unixepoch() + ?4,
              attempts = attempts + 1
          WHERE id IN (
-           SELECT id FROM _joblite_live
+           SELECT id FROM _honker_live
            WHERE queue = ?2
              AND state IN ('pending', 'processing')
              AND (expires_at IS NULL OR expires_at > unixepoch())
@@ -469,7 +469,7 @@ pub fn ack_batch(
     worker_id: &str,
 ) -> rusqlite::Result<i64> {
     let mut stmt = conn.prepare_cached(
-        "DELETE FROM _joblite_live
+        "DELETE FROM _honker_live
          WHERE id IN (SELECT value FROM json_each(?1))
            AND worker_id = ?2
            AND claim_expires_at >= unixepoch()
@@ -515,7 +515,7 @@ pub fn enqueue(
     let channel = format!("honker:{}", queue);
 
     let id: i64 = conn.query_row(
-        "INSERT INTO _joblite_live
+        "INSERT INTO _honker_live
            (queue, payload, run_at, priority, max_attempts, expires_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          RETURNING id",
@@ -524,7 +524,7 @@ pub fn enqueue(
     )?;
     // Fire a wake so workers parked on this queue's channel re-poll.
     conn.execute(
-        "INSERT INTO _litenotify_notifications (channel, payload)
+        "INSERT INTO _honker_notifications (channel, payload)
          VALUES (?1, 'new')",
         rusqlite::params![channel],
     )?;
@@ -536,7 +536,7 @@ pub fn enqueue(
 /// isn't ours.
 pub fn ack(conn: &Connection, job_id: i64, worker_id: &str) -> rusqlite::Result<i64> {
     let deleted = conn.execute(
-        "DELETE FROM _joblite_live
+        "DELETE FROM _honker_live
          WHERE id = ?1 AND worker_id = ?2 AND claim_expires_at >= unixepoch()",
         rusqlite::params![job_id, worker_id],
     )?;
@@ -546,7 +546,7 @@ pub fn ack(conn: &Connection, job_id: i64, worker_id: &str) -> rusqlite::Result<
 /// Retry or fail based on `attempts` vs `max_attempts`. If another
 /// attempt is allowed, flips the row back to `'pending'` with
 /// `run_at = unixepoch() + delay_s` and fires a wake. Otherwise
-/// DELETEs from `_joblite_live` and INSERTs into `_joblite_dead`
+    /// DELETEs from `_honker_live` and INSERTs into `_honker_dead`
 /// with `last_error=error`.
 ///
 /// Returns 1 if either branch ran, 0 if the claim is no longer valid
@@ -563,7 +563,7 @@ pub fn retry(
         .query_row(
             "SELECT id, queue, payload, priority, run_at, max_attempts,
                     attempts, created_at
-             FROM _joblite_live
+             FROM _honker_live
              WHERE id = ?1 AND worker_id = ?2
                AND claim_expires_at >= unixepoch()
                AND state = 'processing'",
@@ -580,11 +580,11 @@ pub fn retry(
     };
     if attempts >= max_attempts {
         conn.execute(
-            "DELETE FROM _joblite_live WHERE id = ?1",
+            "DELETE FROM _honker_live WHERE id = ?1",
             rusqlite::params![id],
         )?;
         conn.execute(
-            "INSERT INTO _joblite_dead
+            "INSERT INTO _honker_dead
                (id, queue, payload, priority, run_at, max_attempts,
                 attempts, last_error, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -595,7 +595,7 @@ pub fn retry(
         )?;
     } else {
         conn.execute(
-            "UPDATE _joblite_live
+            "UPDATE _honker_live
              SET state = 'pending',
                  run_at = unixepoch() + ?2,
                  worker_id = NULL,
@@ -606,16 +606,16 @@ pub fn retry(
         // Fire a wake — the row is now claimable again (after the
         // delay), and waiting workers should re-poll.
         let channel = format!("honker:{}", queue);
-        conn.execute(
-            "INSERT INTO _litenotify_notifications (channel, payload)
-             VALUES (?1, 'retry')",
-            rusqlite::params![channel],
-        )?;
+    conn.execute(
+        "INSERT INTO _honker_notifications (channel, payload)
+         VALUES (?1, 'new')",
+        rusqlite::params![channel],
+    )?;
     }
     Ok(1)
 }
 
-/// Unconditionally move the claim to `_joblite_dead` with the given
+/// Unconditionally move the claim to `_honker_dead` with the given
 /// error. Returns 1 if moved, 0 if not our claim.
 pub fn fail(
     conn: &Connection,
@@ -626,7 +626,7 @@ pub fn fail(
     #[allow(clippy::type_complexity)]
     let row: Option<(i64, String, String, i64, i64, i64, i64, i64)> = conn
         .query_row(
-            "DELETE FROM _joblite_live
+            "DELETE FROM _honker_live
              WHERE id = ?1 AND worker_id = ?2
                AND claim_expires_at >= unixepoch()
              RETURNING id, queue, payload, priority, run_at, max_attempts,
@@ -643,7 +643,7 @@ pub fn fail(
         return Ok(0);
     };
     conn.execute(
-        "INSERT INTO _joblite_dead
+        "INSERT INTO _honker_dead
            (id, queue, payload, priority, run_at, max_attempts,
             attempts, last_error, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -665,7 +665,7 @@ pub fn heartbeat(
     extend_s: i64,
 ) -> rusqlite::Result<i64> {
     let updated = conn.execute(
-        "UPDATE _joblite_live
+        "UPDATE _honker_live
          SET claim_expires_at = unixepoch() + ?3
          WHERE id = ?1 AND worker_id = ?2 AND state = 'processing'",
         rusqlite::params![job_id, worker_id, extend_s],
@@ -677,11 +677,11 @@ pub fn heartbeat(
 // Task expiration
 // ---------------------------------------------------------------------
 
-/// Move expired-pending rows from `_joblite_live` to `_joblite_dead`
+/// Move expired-pending rows from `_honker_live` to `_honker_dead`
 /// with `last_error='expired'`. Returns count moved.
 pub fn sweep_expired(conn: &Connection, queue: &str) -> rusqlite::Result<i64> {
     let mut select = conn.prepare_cached(
-        "DELETE FROM _joblite_live
+        "DELETE FROM _honker_live
          WHERE queue = ?1
            AND state = 'pending'
            AND expires_at IS NOT NULL
@@ -702,7 +702,7 @@ pub fn sweep_expired(conn: &Connection, queue: &str) -> rusqlite::Result<i64> {
         return Ok(0);
     }
     let mut insert = conn.prepare_cached(
-        "INSERT INTO _joblite_dead
+        "INSERT INTO _honker_dead
            (id, queue, payload, priority, run_at, max_attempts,
             attempts, last_error, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'expired', ?8)",
@@ -727,18 +727,18 @@ pub fn lock_acquire(
     ttl_s: i64,
 ) -> rusqlite::Result<i64> {
     conn.execute(
-        "DELETE FROM _joblite_locks
+        "DELETE FROM _honker_locks
          WHERE name = ?1 AND expires_at <= unixepoch()",
         rusqlite::params![name],
     )?;
     conn.execute(
-        "INSERT OR IGNORE INTO _joblite_locks (name, owner, expires_at)
+        "INSERT OR IGNORE INTO _honker_locks (name, owner, expires_at)
          VALUES (?1, ?2, unixepoch() + ?3)",
         rusqlite::params![name, owner, ttl_s],
     )?;
     let current: Option<String> = conn
         .query_row(
-            "SELECT owner FROM _joblite_locks WHERE name = ?1",
+            "SELECT owner FROM _honker_locks WHERE name = ?1",
             rusqlite::params![name],
             |r| r.get(0),
         )
@@ -752,7 +752,7 @@ pub fn lock_release(
     owner: &str,
 ) -> rusqlite::Result<i64> {
     let deleted = conn.execute(
-        "DELETE FROM _joblite_locks WHERE name = ?1 AND owner = ?2",
+        "DELETE FROM _honker_locks WHERE name = ?1 AND owner = ?2",
         rusqlite::params![name, owner],
     )?;
     Ok(deleted as i64)
@@ -778,7 +778,7 @@ pub fn rate_limit_try(
     )?;
     let current: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(count), 0) FROM _joblite_rate_limits
+            "SELECT COALESCE(MAX(count), 0) FROM _honker_rate_limits
              WHERE name = ?1 AND window_start = ?2",
             rusqlite::params![name, window_start],
             |r| r.get(0),
@@ -788,7 +788,7 @@ pub fn rate_limit_try(
         return Ok(0);
     }
     conn.execute(
-        "INSERT INTO _joblite_rate_limits (name, window_start, count)
+        "INSERT INTO _honker_rate_limits (name, window_start, count)
          VALUES (?1, ?2, 1)
          ON CONFLICT(name, window_start) DO UPDATE SET count = count + 1",
         rusqlite::params![name, window_start],
@@ -801,7 +801,7 @@ pub fn rate_limit_sweep(
     older_than_s: i64,
 ) -> rusqlite::Result<i64> {
     let deleted = conn.execute(
-        "DELETE FROM _joblite_rate_limits
+        "DELETE FROM _honker_rate_limits
          WHERE window_start < unixepoch() - ?1",
         rusqlite::params![older_than_s],
     )?;
@@ -828,7 +828,7 @@ pub fn scheduler_register(
     let now = now_unix(conn)?;
     let next_fire_at = super::cron::next_after_unix(cron_expr, now).map_err(to_sql_err)?;
     conn.execute(
-        "INSERT INTO _joblite_scheduler_tasks
+        "INSERT INTO _honker_scheduler_tasks
            (name, queue, cron_expr, payload, priority, expires_s, next_fire_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(name) DO UPDATE SET
@@ -845,7 +845,7 @@ pub fn scheduler_register(
 
 pub fn scheduler_unregister(conn: &Connection, name: &str) -> rusqlite::Result<i64> {
     let n = conn.execute(
-        "DELETE FROM _joblite_scheduler_tasks WHERE name = ?1",
+        "DELETE FROM _honker_scheduler_tasks WHERE name = ?1",
         rusqlite::params![name],
     )?;
     Ok(n as i64)
@@ -862,7 +862,7 @@ pub fn scheduler_tick(conn: &Connection, now_unix: i64) -> rusqlite::Result<Stri
     let tasks: Vec<(String, String, String, String, i64, Option<i64>, i64)> = {
         let mut stmt = conn.prepare_cached(
             "SELECT name, queue, cron_expr, payload, priority, expires_s, next_fire_at
-             FROM _joblite_scheduler_tasks
+             FROM _honker_scheduler_tasks
              WHERE next_fire_at <= ?1",
         )?;
         stmt.query_map(rusqlite::params![now_unix], |r| {
@@ -911,7 +911,7 @@ pub fn scheduler_tick(conn: &Connection, now_unix: i64) -> rusqlite::Result<Stri
         }
         // Persist the advanced next_fire_at.
         conn.execute(
-            "UPDATE _joblite_scheduler_tasks
+            "UPDATE _honker_scheduler_tasks
              SET next_fire_at = ?2 WHERE name = ?1",
             rusqlite::params![name, next_fire_at],
         )?;
@@ -923,7 +923,7 @@ pub fn scheduler_tick(conn: &Connection, now_unix: i64) -> rusqlite::Result<Stri
 pub fn scheduler_soonest(conn: &Connection) -> rusqlite::Result<i64> {
     Ok(conn
         .query_row(
-            "SELECT COALESCE(MIN(next_fire_at), 0) FROM _joblite_scheduler_tasks",
+            "SELECT COALESCE(MIN(next_fire_at), 0) FROM _honker_scheduler_tasks",
             [],
             |r| r.get(0),
         )
@@ -942,7 +942,7 @@ pub fn result_save(
 ) -> rusqlite::Result<i64> {
     if ttl_s > 0 {
         conn.execute(
-            "INSERT INTO _joblite_results (job_id, value, expires_at)
+            "INSERT INTO _honker_results (job_id, value, expires_at)
              VALUES (?1, ?2, unixepoch() + ?3)
              ON CONFLICT(job_id) DO UPDATE
                SET value = excluded.value,
@@ -951,7 +951,7 @@ pub fn result_save(
         )?;
     } else {
         conn.execute(
-            "INSERT INTO _joblite_results (job_id, value, expires_at)
+            "INSERT INTO _honker_results (job_id, value, expires_at)
              VALUES (?1, ?2, NULL)
              ON CONFLICT(job_id) DO UPDATE
                SET value = excluded.value,
@@ -968,7 +968,7 @@ pub fn result_get(
 ) -> rusqlite::Result<Option<String>> {
     let row: Option<(Option<String>, Option<i64>)> = conn
         .query_row(
-            "SELECT value, expires_at FROM _joblite_results WHERE job_id = ?1",
+            "SELECT value, expires_at FROM _honker_results WHERE job_id = ?1",
             rusqlite::params![job_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -982,7 +982,7 @@ pub fn result_get(
 
 pub fn result_sweep(conn: &Connection) -> rusqlite::Result<i64> {
     let deleted = conn.execute(
-        "DELETE FROM _joblite_results
+        "DELETE FROM _honker_results
          WHERE expires_at IS NOT NULL AND expires_at <= unixepoch()",
         [],
     )?;
@@ -1000,7 +1000,7 @@ pub fn stream_publish(
     payload: &str,
 ) -> rusqlite::Result<i64> {
     let offset: i64 = conn.query_row(
-        "INSERT INTO _joblite_stream (topic, key, payload)
+        "INSERT INTO _honker_stream (topic, key, payload)
          VALUES (?1, ?2, ?3)
          RETURNING offset",
         rusqlite::params![topic, key, payload],
@@ -1008,7 +1008,7 @@ pub fn stream_publish(
     )?;
     let channel = format!("honker:stream:{}", topic);
     conn.execute(
-        "INSERT INTO _litenotify_notifications (channel, payload)
+        "INSERT INTO _honker_notifications (channel, payload)
          VALUES (?1, 'new')",
         rusqlite::params![channel],
     )?;
@@ -1026,7 +1026,7 @@ pub fn stream_read_since(
 ) -> rusqlite::Result<String> {
     let mut stmt = conn.prepare_cached(
         "SELECT offset, topic, key, payload, created_at
-         FROM _joblite_stream
+         FROM _honker_stream
          WHERE topic = ?1 AND offset > ?2
          ORDER BY offset ASC
          LIMIT ?3",
@@ -1077,10 +1077,10 @@ pub fn stream_save_offset(
     // Monotonic upsert: WHERE excluded.offset > existing. The CHANGES
     // pragma reports affected rows, which we translate to 1/0.
     let changed = conn.execute(
-        "INSERT INTO _joblite_stream_consumers (name, topic, offset)
+        "INSERT INTO _honker_stream_consumers (name, topic, offset)
          VALUES (?1, ?2, ?3)
          ON CONFLICT(name, topic) DO UPDATE SET offset = excluded.offset
-           WHERE excluded.offset > _joblite_stream_consumers.offset",
+           WHERE excluded.offset > _honker_stream_consumers.offset",
         rusqlite::params![consumer, topic, offset],
     )?;
     Ok(if changed > 0 { 1 } else { 0 })
@@ -1093,7 +1093,7 @@ pub fn stream_get_offset(
 ) -> rusqlite::Result<i64> {
     Ok(conn
         .query_row(
-            "SELECT offset FROM _joblite_stream_consumers
+            "SELECT offset FROM _honker_stream_consumers
              WHERE name = ?1 AND topic = ?2",
             rusqlite::params![consumer, topic],
             |r| r.get(0),

@@ -17,7 +17,7 @@ import sys
 
 import pytest
 
-import joblite
+import honker
 
 
 def test_corrupted_db_file_raises_on_first_use(tmp_path):
@@ -33,11 +33,11 @@ def test_corrupted_db_file_raises_on_first_use(tmp_path):
     # to be a plausible corrupt file.
     path.write_bytes(b"NOT_AN_SQLITE_FILE" + b"\x00" * 4078)
 
-    # Either `joblite.open` or the first query must raise. The
+    # Either `honker.open` or the first query must raise. The
     # exact point depends on when SQLite validates the header —
     # usually on first PRAGMA after open.
     with pytest.raises(RuntimeError, match="not a database|corrupt|malformed"):
-        db = joblite.open(str(path))
+        db = honker.open(str(path))
         db.query("SELECT 1")
 
 
@@ -51,7 +51,7 @@ def test_readonly_directory_raises_clear_error(tmp_path):
     try:
         path = str(ro_dir / "t.db")
         with pytest.raises(RuntimeError, match="unable to open"):
-            joblite.open(path)
+            honker.open(path)
     finally:
         os.chmod(str(ro_dir), 0o755)  # let the tmp-cleanup remove it
 
@@ -62,7 +62,7 @@ def test_readonly_db_file_raises_on_write(tmp_path):
     but the first write must raise a clear "readonly database"
     error. Users MUST see a loud failure, never a silent drop."""
     path = tmp_path / "t.db"
-    db = joblite.open(str(path))
+    db = honker.open(str(path))
     db.queue("x").enqueue({"i": 1})
     del db
 
@@ -72,7 +72,7 @@ def test_readonly_db_file_raises_on_write(tmp_path):
     os.chmod(str(tmp_path), stat.S_IRUSR | stat.S_IXUSR)
     try:
         with pytest.raises(RuntimeError, match="readonly|unable to open"):
-            db2 = joblite.open(str(path))
+            db2 = honker.open(str(path))
             db2.queue("x").enqueue({"i": 2})
     finally:
         os.chmod(str(tmp_path), 0o755)
@@ -84,7 +84,7 @@ def test_nonexistent_parent_dir_raises(tmp_path):
     create the dir silently and certainly not hang."""
     path = str(tmp_path / "no" / "such" / "dir" / "t.db")
     with pytest.raises(RuntimeError, match="unable to open"):
-        joblite.open(path)
+        honker.open(path)
 
 
 @pytest.mark.linux_only
@@ -114,7 +114,7 @@ def test_enqueue_on_full_filesystem_raises_disk_full(tmp_path):
 
     try:
         path = str(mount_dir / "t.db")
-        db = joblite.open(path)
+        db = honker.open(path)
         q = db.queue("x")
         # Keep enqueueing big payloads until the tmpfs is full. The
         # failing call must raise — NOT return without an error.

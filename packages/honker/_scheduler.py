@@ -1,4 +1,4 @@
-"""Crontab-style periodic-task scheduler for joblite.
+"""Crontab-style periodic-task scheduler for honker.
 
 A scheduler process holds a set of named schedules (cron expressions
 → queue + payload). On each cron boundary, it enqueues the payload
@@ -7,10 +7,10 @@ scheduler itself doesn't run handlers — it just dispatches.
 
 Registration + fire-due logic live in Rust via `honker_scheduler_register`
 and `honker_scheduler_tick`; this module is a thin asyncio wrapper. Tasks
-persist in `_joblite_scheduler_tasks`, so any process (Python, a `sqlite3
+persist in `_honker_scheduler_tasks`, so any process (Python, a `sqlite3
 .load` session, a future Node/Go binding) sees the same registrations.
 
-Leader election via `db.lock('joblite-scheduler', ttl=60)` ensures at
+Leader election via `db.lock('honker-scheduler', ttl=60)` ensures at
 most one scheduler fires across all scheduler processes. A periodic
 heartbeat refreshes the lock's TTL during long sleeps between fires.
 If the leader crashes, the TTL elapses and a standby can take over.
@@ -24,10 +24,10 @@ of executed.
 Usage:
 
     import asyncio
-    import joblite
-    from joblite import Scheduler, crontab
+    import honker
+    from honker import Scheduler, crontab
 
-    db = joblite.open("app.db")
+    db = honker.open("app.db")
     scheduler = Scheduler(db)
     scheduler.add(
         name="nightly-backup",
@@ -52,13 +52,13 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-import litenotify
+import _honker_native
 
 
 class CronSchedule:
     """Thin marker around a 5-field cron expression. All parsing and
-    next-boundary computation lives in Rust (`litenotify.cron_next_after`
-    / `honker_cron_next_after`) so every language binding shares one
+    next-boundary computation lives in Rust (`honker.cron_next_after`
+ / `honker_cron_next_after`) so every language binding shares one
     implementation.
 
     Fields (standard Unix cron):
@@ -79,7 +79,7 @@ class CronSchedule:
         # Validate eagerly by asking Rust to compute one boundary from
         # a known timestamp. Raises ValueError on malformed input
         # (field count, out-of-range, inverted range, bad step).
-        litenotify.cron_next_after(expr, 0)
+        _honker_native.cron_next_after(expr, 0)
         self.expr = expr
 
     def __repr__(self) -> str:
@@ -91,7 +91,7 @@ class CronSchedule:
         Raises `ValueError` if no match exists within ~5 years.
         """
         return datetime.fromtimestamp(
-            litenotify.cron_next_after(self.expr, int(dt.timestamp()))
+            _honker_native.cron_next_after(self.expr, int(dt.timestamp()))
         )
 
 
@@ -110,7 +110,7 @@ class Scheduler:
     ~40 lines of asyncio glue around lock + tick + sleep + heartbeat.
     """
 
-    LOCK_NAME = "joblite-scheduler"
+    LOCK_NAME = "honker-scheduler"
     LOCK_TTL = 60
     HEARTBEAT_INTERVAL = 30
 
@@ -119,7 +119,7 @@ class Scheduler:
         self.lock_name = lock_name or self.LOCK_NAME
         # Names registered via this Scheduler instance. The
         # authoritative registration lives in
-        # `_joblite_scheduler_tasks` — this set only exists so a
+        # `_honker_scheduler_tasks` — this set only exists so a
         # process with no tasks to add doesn't acquire the lock in
         # `run()`.
         self._registered: set[str] = set()
@@ -133,7 +133,7 @@ class Scheduler:
         priority: int = 0,
         expires: Optional[float] = None,
     ) -> None:
-        """Register a periodic task in `_joblite_scheduler_tasks`.
+        """Register a periodic task in `_honker_scheduler_tasks`.
 
         - `name`: unique per-scheduler identifier. A second `add`
           with the same name replaces the first registration
@@ -144,7 +144,7 @@ class Scheduler:
         - `priority`: enqueue priority for fired jobs.
         - `expires`: how many seconds a fired job stays claimable.
           `queue.sweep_expired()` moves expired rows into
-          `_joblite_dead`.
+          `_honker_dead`.
         """
         with self.db.transaction() as tx:
             tx.query(
@@ -178,7 +178,7 @@ class Scheduler:
         """Acquire the leader lock and run the scheduler loop until
         `stop_event` is set or the enclosing task is cancelled.
 
-        Raises `joblite.LockHeld` if another scheduler already holds
+        Raises `honker.LockHeld` if another scheduler already holds
         the lock. Callers that want hot-standby semantics should wrap
         in a retry loop.
         """
@@ -216,7 +216,7 @@ class Scheduler:
                 pass
             with self.db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_locks "
+                    "UPDATE _honker_locks "
                     "SET expires_at = unixepoch() + ? "
                     "WHERE name = ?",
                     [self.LOCK_TTL, self.lock_name],

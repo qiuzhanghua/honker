@@ -1,11 +1,11 @@
-//! Shared Rust core for the litenotify bindings.
+//! Shared Rust core for the honker bindings.
 //!
 //! This crate is NOT intended for direct use. It's the plain-Rust
 //! foundation that three binding crates depend on:
 //!
-//!   * `litenotify`           — PyO3 Python extension
-//!   * `litenotify-extension` — SQLite loadable extension (cdylib)
-//!   * `litenotify-node`      — napi-rs Node.js binding
+//!   * `honker`               — PyO3 Python extension
+//!   * `honker-extension`    — SQLite loadable extension (cdylib)
+//!   * `honker-node`         — napi-rs Node.js binding
 //!
 //! Moving this code here once avoids the three-copies-of-the-same-SQL
 //! problem every binding would otherwise suffer. Behavioral drift
@@ -18,7 +18,7 @@
 //!
 //!   - [`open_conn`] — open a SQLite connection with the library's
 //!     PRAGMA defaults (WAL, synchronous=NORMAL, 32MB cache, etc.).
-//!   - [`attach_notify`] — create `_litenotify_notifications` and
+//!   - [`attach_notify`] — create `_honker_notifications` and
 //!     register the `notify(channel, payload)` SQL scalar function.
 //!   - [`Writer`] — single-connection write slot with blocking
 //!     acquire, non-blocking try_acquire, and release.
@@ -89,7 +89,7 @@ pub fn apply_default_pragmas(conn: &Connection) -> rusqlite::Result<()> {
 // notify() SQL function + notifications schema
 // ---------------------------------------------------------------------
 
-/// Install the `_litenotify_notifications` table and the
+/// Install the `_honker_notifications` table and the
 /// `notify(channel, payload)` SQL scalar function on `conn`. Idempotent.
 ///
 /// `notify()` is the public cross-process primitive. Callers do:
@@ -109,14 +109,14 @@ pub fn apply_default_pragmas(conn: &Connection) -> rusqlite::Result<()> {
 /// to trim the table. No magic timer.
 pub fn attach_notify(conn: &Connection) -> Result<(), Error> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS _litenotify_notifications (
+        "CREATE TABLE IF NOT EXISTS _honker_notifications (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            channel TEXT NOT NULL,
            payload TEXT NOT NULL,
            created_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         CREATE INDEX IF NOT EXISTS _litenotify_notifications_recent
-           ON _litenotify_notifications(channel, id);",
+         CREATE INDEX IF NOT EXISTS _honker_notifications_recent
+           ON _honker_notifications(channel, id);",
     )?;
 
     conn.create_scalar_function(
@@ -126,11 +126,9 @@ pub fn attach_notify(conn: &Connection) -> Result<(), Error> {
         |ctx| {
             let channel: String = ctx.get(0)?;
             let payload: String = ctx.get(1)?;
-            // Inside a user tx; INSERT inherits the tx. Rollback drops
-            // the notification atomically with whatever else rolled back.
             let db = unsafe { ctx.get_connection() }?;
             let mut ins = db.prepare_cached(
-                "INSERT INTO _litenotify_notifications (channel, payload) VALUES (?1, ?2)",
+                "INSERT INTO _honker_notifications (channel, payload) VALUES (?1, ?2)",
             )?;
             let id = ins.insert(rusqlite::params![channel, payload])?;
             Ok(id)
@@ -141,19 +139,19 @@ pub fn attach_notify(conn: &Connection) -> Result<(), Error> {
 }
 
 // ---------------------------------------------------------------------
-// joblite queue schema
+// honker queue schema
 // ---------------------------------------------------------------------
 
-/// Canonical DDL for the joblite queue schema. Shared source of truth
+/// Canonical DDL for the honker queue schema. Shared source of truth
 /// so the Python binding's `Queue._init_schema`, the SQLite loadable
-/// extension's `jl_bootstrap()`, and any future binding can't drift.
+/// extension's `honker_bootstrap()`, and any future binding can't drift.
 ///
 /// Schema:
 ///
-///   * `_joblite_live`  — pending + processing jobs. Partial index
-///     `_joblite_live_claim` restricts to those two states so dead-row
+///   * `_honker_live`  — pending + processing jobs. Partial index
+///     `_honker_live_claim` restricts to those two states so dead-row
 ///     history never slows down the claim hot path.
-///   * `_joblite_dead`  — terminal rows (retry-exhausted or explicitly
+///   * `_honker_dead`  — terminal rows (retry-exhausted or explicitly
 ///     failed). Never scanned by the claim path; retention policy is
 ///     the user's problem.
 ///
@@ -161,7 +159,7 @@ pub fn attach_notify(conn: &Connection) -> Result<(), Error> {
 /// EXISTS`). Views and schema-version cleanup live in the language
 /// binding, not here — they're caller-specific.
 pub const BOOTSTRAP_JOBLITE_SQL: &str = "
-    CREATE TABLE IF NOT EXISTS _joblite_live (
+    CREATE TABLE IF NOT EXISTS _honker_live (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       queue TEXT NOT NULL,
       payload TEXT NOT NULL,
@@ -175,10 +173,10 @@ pub const BOOTSTRAP_JOBLITE_SQL: &str = "
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       expires_at INTEGER
     );
-    CREATE INDEX IF NOT EXISTS _joblite_live_claim
-      ON _joblite_live(queue, priority DESC, run_at, id)
+    CREATE INDEX IF NOT EXISTS _honker_live_claim
+      ON _honker_live(queue, priority DESC, run_at, id)
       WHERE state IN ('pending', 'processing');
-    CREATE TABLE IF NOT EXISTS _joblite_dead (
+    CREATE TABLE IF NOT EXISTS _honker_dead (
       id INTEGER PRIMARY KEY,
       queue TEXT NOT NULL,
       payload TEXT NOT NULL,
@@ -190,18 +188,18 @@ pub const BOOTSTRAP_JOBLITE_SQL: &str = "
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       died_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
-    CREATE TABLE IF NOT EXISTS _joblite_locks (
+    CREATE TABLE IF NOT EXISTS _honker_locks (
       name TEXT PRIMARY KEY,
       owner TEXT NOT NULL,
       expires_at INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS _joblite_rate_limits (
+    CREATE TABLE IF NOT EXISTS _honker_rate_limits (
       name TEXT NOT NULL,
       window_start INTEGER NOT NULL,
       count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (name, window_start)
     );
-    CREATE TABLE IF NOT EXISTS _joblite_scheduler_tasks (
+    CREATE TABLE IF NOT EXISTS _honker_scheduler_tasks (
       name TEXT PRIMARY KEY,
       queue TEXT NOT NULL,
       cron_expr TEXT NOT NULL,
@@ -210,22 +208,22 @@ pub const BOOTSTRAP_JOBLITE_SQL: &str = "
       expires_s INTEGER,
       next_fire_at INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS _joblite_results (
+    CREATE TABLE IF NOT EXISTS _honker_results (
       job_id INTEGER PRIMARY KEY,
       value TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       expires_at INTEGER
     );
-    CREATE TABLE IF NOT EXISTS _joblite_stream (
+    CREATE TABLE IF NOT EXISTS _honker_stream (
       offset INTEGER PRIMARY KEY AUTOINCREMENT,
       topic TEXT NOT NULL,
       key TEXT,
       payload TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
-    CREATE INDEX IF NOT EXISTS _joblite_stream_topic
-      ON _joblite_stream(topic, offset);
-    CREATE TABLE IF NOT EXISTS _joblite_stream_consumers (
+    CREATE INDEX IF NOT EXISTS _honker_stream_topic
+      ON _honker_stream(topic, offset);
+    CREATE TABLE IF NOT EXISTS _honker_stream_consumers (
       name TEXT NOT NULL,
       topic TEXT NOT NULL,
       offset INTEGER NOT NULL DEFAULT 0,
@@ -413,7 +411,7 @@ impl WalWatcher {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_t = stop.clone();
         std::thread::Builder::new()
-            .name("litenotify-wal-poll".into())
+            .name("honker-wal-poll".into())
             .spawn(move || {
                 let mut last = stat_pair(&wal_path);
                 while !stop_t.load(Ordering::Acquire) {
@@ -543,7 +541,7 @@ mod tests {
 
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM _litenotify_notifications WHERE channel='orders'",
+                "SELECT COUNT(*) FROM _honker_notifications WHERE channel='orders'",
                 [],
                 |row| row.get(0),
             )
@@ -562,7 +560,7 @@ mod tests {
 
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM _litenotify_notifications",
+                "SELECT COUNT(*) FROM _honker_notifications",
                 [],
                 |row| row.get(0),
             )
@@ -589,7 +587,7 @@ mod tests {
     #[test]
     fn shared_wal_watcher_fans_out_to_many_subscribers() {
         let tmp = std::env::temp_dir().join(format!(
-            "litenotify-shared-test-{}",
+            "honker-shared-test-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&tmp);
@@ -619,7 +617,7 @@ mod tests {
     #[test]
     fn shared_wal_watcher_explicit_unsubscribe_disconnects_receiver() {
         let tmp = std::env::temp_dir().join(format!(
-            "litenotify-unsub-test-{}",
+            "honker-unsub-test-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&tmp);
@@ -642,7 +640,7 @@ mod tests {
     #[test]
     fn shared_wal_watcher_prunes_subscribers_when_receiver_dropped() {
         let tmp = std::env::temp_dir().join(format!(
-            "litenotify-prune-test-{}",
+            "honker-prune-test-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&tmp);
@@ -683,11 +681,11 @@ mod tests {
         // Idempotent.
         bootstrap_joblite_schema(&conn).unwrap();
 
-        // _joblite_live has the 12 columns we expect (Python binding
-        // and the extension have historically disagreed on _joblite_dead
+        // _honker_live has the 12 columns we expect (Python binding
+        // and the extension have historically disagreed on _honker_dead
         // column count; this pins both).
         let live_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_live')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_live')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -697,7 +695,7 @@ mod tests {
         assert!(live_cols.contains(&"expires_at".to_string()));
 
         let dead_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_dead')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_dead')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -713,16 +711,16 @@ mod tests {
         let idx: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type='index' AND name='_joblite_live_claim'",
+                 WHERE type='index' AND name='_honker_live_claim'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(idx, 1);
 
-        // _joblite_locks table present for db.lock() support.
+        // _honker_locks table present for db.lock() support.
         let locks_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_locks')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_locks')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -730,9 +728,9 @@ mod tests {
             .unwrap();
         assert_eq!(locks_cols, vec!["name", "owner", "expires_at"]);
 
-        // _joblite_rate_limits table present for db.try_rate_limit().
+        // _honker_rate_limits table present for db.try_rate_limit().
         let rl_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_rate_limits')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_rate_limits')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -740,10 +738,10 @@ mod tests {
             .unwrap();
         assert_eq!(rl_cols, vec!["name", "window_start", "count"]);
 
-        // _joblite_scheduler_tasks table present for Scheduler's
+        // _honker_scheduler_tasks table present for Scheduler's
         // per-task registration + next_fire_at persistence.
         let sched_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_scheduler_tasks')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_scheduler_tasks')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -761,10 +759,8 @@ mod tests {
                 "next_fire_at",
             ],
         );
-
-        // _joblite_results table for task result storage.
         let res_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_results')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_results')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -775,10 +771,10 @@ mod tests {
             vec!["job_id", "value", "created_at", "expires_at"]
         );
 
-        // _joblite_stream + _joblite_stream_consumers tables for
+        // _honker_stream + _honker_stream_consumers tables for
         // durable pub/sub streams.
         let stream_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_stream')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_stream')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -789,7 +785,7 @@ mod tests {
             vec!["offset", "topic", "key", "payload", "created_at"]
         );
         let sc_cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('_joblite_stream_consumers')")
+            .prepare("SELECT name FROM pragma_table_info('_honker_stream_consumers')")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()

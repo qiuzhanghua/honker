@@ -9,7 +9,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packages"))
-import joblite  # noqa: E402
+import honker  # noqa: E402
 
 
 async def main():
@@ -18,7 +18,7 @@ async def main():
     args = ap.parse_args()
 
     d = tempfile.mkdtemp()
-    db = joblite.open(os.path.join(d, "stream.db"))
+    db = honker.open(os.path.join(d, "stream.db"))
     s = db.stream("bench")
 
     # Publish throughput

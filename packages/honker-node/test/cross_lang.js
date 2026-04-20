@@ -5,8 +5,8 @@
 //   2. Node writes → Python reads (listen() iterator)
 //   3. Schema compat: Python bootstraps joblite tables, Node sees
 //      them via raw SQL (Node binding doesn't expose jl_* functions —
-//      it's the `litenotify` binding — but the shared _litenotify_
-//      _notifications + _joblite_* tables are interoperable.)
+//      it's the `honker` binding — but the shared _honker_
+ //      _notifications + _honker_* tables are interoperable.)
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
@@ -27,21 +27,21 @@ test('python writes notifications; node reads via WAL wake + SELECT', async () =
     // Record last_seen before the writer fires.
     let lastSeen = 0;
     const initial = db.query(
-      'SELECT COALESCE(MAX(id), 0) AS m FROM _litenotify_notifications',
+      'SELECT COALESCE(MAX(id), 0) AS m FROM _honker_notifications',
     );
     lastSeen = initial[0].m;
 
     // Python writer: emits 3 notifications on channel 'orders'.
-    // __dirname = packages/litenotify-node/test
+    // __dirname = packages/honker-node/test
     // ../../..  = repo root;  ../..  = packages/
     const REPO = path.resolve(__dirname, '..', '..', '..');
     const PACKAGES = path.resolve(__dirname, '..', '..');
     const pyScript = `
 import sys, time
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
-import joblite
+import honker
 time.sleep(0.3)
-db = joblite.open(${JSON.stringify(dbPath)})
+db = honker.open(${JSON.stringify(dbPath)})
 with db.transaction() as tx:
     tx.notify("orders", {"id": 1})
     tx.notify("orders", {"id": 2})
@@ -65,7 +65,7 @@ with db.transaction() as tx:
           ),
         ]);
         const rows = db.query(
-          "SELECT id, channel, payload FROM _litenotify_notifications " +
+          "SELECT id, channel, payload FROM _honker_notifications " +
             "WHERE channel='orders' AND id > ? ORDER BY id",
           [lastSeen],
         );
@@ -107,10 +107,10 @@ test('node writes notifications; python reads via listen()', async () => {
     const pyScript = `
 import asyncio, json, sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
-import joblite
+import honker
 
 async def main():
-    db = joblite.open(${JSON.stringify(dbPath)})
+    db = honker.open(${JSON.stringify(dbPath)})
     lst = db.listen("reverse")
     print("READY", flush=True)
     got = []
@@ -212,11 +212,11 @@ asyncio.run(main())
   }
 });
 
-// Schema compat: a .db bootstrapped by joblite.open() in Python
-// has every _joblite_* + _litenotify_* table. Node (which only
-// knows about _litenotify_notifications natively) can still read
-// them via raw SQL. Proves the tables aren't PyO3-gated — the
-// on-disk format is language-neutral.
+// Schema compat: a .db bootstrapped by honker.open() in Python
+// has every _honker_* table. Node (which only
+ // knows about _honker_notifications natively) can still read
+ // them via raw SQL. Proves the tables aren't PyO3-gated —
+ // on-disk format is language-neutral.
 test(
   'python bootstraps joblite schema; node reads tables via raw SQL',
   async () => {
@@ -228,8 +228,8 @@ test(
       const pyScript = `
 import sys
 sys.path.insert(0, ${JSON.stringify(PACKAGES)})
-import joblite
-db = joblite.open(${JSON.stringify(dbPath)})
+import honker
+db = honker.open(${JSON.stringify(dbPath)})
 q = db.queue("shared")
 q.enqueue({"from": "python", "i": 1})
 q.enqueue({"from": "python", "i": 2})
@@ -252,7 +252,7 @@ print("DONE", flush=True)
       // see both enqueued jobs via raw SELECT on the shared table.
       const db = lit.open(dbPath);
       const rows = db.query(
-        "SELECT id, queue, payload FROM _joblite_live " +
+        "SELECT id, queue, payload FROM _honker_live " +
           "WHERE queue='shared' ORDER BY id",
       );
       assert.equal(rows.length, 2);
@@ -272,15 +272,15 @@ print("DONE", flush=True)
         )
         .map((r) => r.name);
       for (const expected of [
-        '_litenotify_notifications',
-        '_joblite_live',
-        '_joblite_dead',
-        '_joblite_locks',
-        '_joblite_rate_limits',
-        '_joblite_scheduler_tasks',
-        '_joblite_results',
-        '_joblite_stream',
-        '_joblite_stream_consumers',
+        '_honker_notifications',
+        '_honker_live',
+        '_honker_dead',
+        '_honker_locks',
+        '_honker_rate_limits',
+        '_honker_scheduler_tasks',
+        '_honker_results',
+        '_honker_stream',
+        '_honker_stream_consumers',
       ]) {
         assert.ok(
           tableNames.includes(expected),

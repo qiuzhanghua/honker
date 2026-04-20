@@ -17,8 +17,8 @@ import time
 
 import pytest
 
-import joblite
-from joblite import Scheduler, crontab
+import honker
+from honker import Scheduler, crontab
 
 
 @pytest.mark.slow
@@ -31,7 +31,7 @@ async def test_scheduler_fires_at_real_minute_boundary(db_path):
 
     Runs for up to ~65s in the worst case (just after a boundary).
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("real-boundary")
     sched = Scheduler(db)
     sched.add(
@@ -66,7 +66,7 @@ async def test_scheduler_fires_at_real_minute_boundary(db_path):
     # Inspect the queue. Exactly one job should have fired at the
     # boundary (± the scheduler's sleep resolution).
     rows = db.query(
-        "SELECT created_at FROM _joblite_live WHERE queue='real-boundary'"
+        "SELECT created_at FROM _honker_live WHERE queue='real-boundary'"
     )
     stop_event.set()
     await asyncio.wait_for(run_task, timeout=5.0)
@@ -91,7 +91,7 @@ async def test_scheduler_does_not_busy_loop_between_boundaries(db_path):
     `honker_scheduler_tick` got called. If the sleep math is wrong
     (soonest returns a value in the past), we'd see hundreds.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("idle-q")
     sched = Scheduler(db)
     sched.add(
@@ -104,7 +104,7 @@ async def test_scheduler_does_not_busy_loop_between_boundaries(db_path):
     # the task's `next_fire_at` and watching it for unexpected
     # advancement (would indicate a tick fired when it shouldn't).
     row_before = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='far'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='far'"
     )[0]
     before_next = int(row_before["next_fire_at"])
 
@@ -117,7 +117,7 @@ async def test_scheduler_does_not_busy_loop_between_boundaries(db_path):
     # In 3s, no fire should happen (next fire is 1-5 minutes out).
     # next_fire_at should be unchanged.
     row_after = db.query(
-        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='far'"
+        "SELECT next_fire_at FROM _honker_scheduler_tasks WHERE name='far'"
     )[0]
     after_next = int(row_after["next_fire_at"])
     assert after_next == before_next, (
@@ -127,6 +127,6 @@ async def test_scheduler_does_not_busy_loop_between_boundaries(db_path):
     )
     # And no jobs landed.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='idle-q'"
+        "SELECT COUNT(*) AS c FROM _honker_live WHERE queue='idle-q'"
     )
     assert rows[0]["c"] == 0

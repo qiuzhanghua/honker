@@ -52,7 +52,7 @@ def seed_pending(db_path: str, queue: str, n: int) -> None:
     t = _t.perf_counter()
     conn.executemany(
         """
-        INSERT INTO _joblite_live (queue, payload, state)
+        INSERT INTO _honker_live (queue, payload, state)
         VALUES (?, ?, 'pending')
         """,
         (
@@ -69,10 +69,10 @@ def seed_dead(db_path: str, n: int) -> None:
     historical job volume. Grows the DB file without going through the
     joblite Python layer."""
     import sqlite3
-    import joblite
+    import honker
 
     # Let joblite init the schema first.
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     db.queue("hist")
     del db
 
@@ -83,7 +83,7 @@ def seed_dead(db_path: str, n: int) -> None:
     conn.execute("BEGIN")
     conn.executemany(
         """
-        INSERT INTO _joblite_dead
+        INSERT INTO _honker_dead
           (id, queue, payload, priority, run_at, max_attempts, attempts,
            last_error, created_at, died_at)
         VALUES (?, 'hist', ?, 0, 0, 3, 3, 'fake', 0, 0)
@@ -112,10 +112,10 @@ def worker_script(
         f"""
         import asyncio, struct, sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import joblite
+        import honker
 
         async def main():
-            db = joblite.open({db_path!r})
+            db = honker.open({db_path!r})
             q = db.queue({queue!r})
             processed = 0
             buf = bytearray()
@@ -152,9 +152,9 @@ def enqueuer_script(db_path: str, queue: str, rate_per_sec: int) -> str:
         f"""
         import sys, time
         sys.path.insert(0, {PACKAGES_ROOT!r})
-        import joblite
+        import honker
 
-        db = joblite.open({db_path!r})
+        db = honker.open({db_path!r})
         q = db.queue({queue!r})
         rate = {rate}
         interval = 1.0 / rate if rate > 0 else 0.0
@@ -334,7 +334,7 @@ def main():
         "--dead-rows",
         type=int,
         default=100_000,
-        help="Rows to insert into _joblite_dead up front, simulating history",
+        help="Rows to insert into _honker_dead up front, simulating history",
     )
     ap.add_argument(
         "--preseed-jobs",

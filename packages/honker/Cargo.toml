@@ -1,10 +1,10 @@
 [package]
-name = "litenotify"
+name = "honker"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "litenotify"
+name = "_honker_native"
 crate-type = ["cdylib"]
 
 [dependencies]

@@ -4,11 +4,11 @@ import asyncio
 
 import pytest
 
-import joblite
+import honker
 
 
 async def test_outbox_delivery_called_and_acked(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     delivered = []
 
     async def deliver(payload):
@@ -31,13 +31,13 @@ async def test_outbox_delivery_called_and_acked(db_path):
     assert [d["body"] for d in delivered] == ["1", "2"]
     # ack DELETEs the processing row, so both jobs are gone from the view.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["_outbox:webhook"]
+        "SELECT COUNT(*) AS c FROM _honker_jobs WHERE queue=?", ["_outbox:webhook"]
     )
     assert rows[0]["c"] == 0
 
 
 async def test_outbox_retries_on_exception(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     calls: list = []
 
     async def deliver(payload):
@@ -63,7 +63,7 @@ async def test_outbox_retries_on_exception(db_path):
             # on the pending table (that's where retried jobs land).
             with db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_live SET run_at=unixepoch() - 1 WHERE queue=?",
+                    "UPDATE _honker_live SET run_at=unixepoch() - 1 WHERE queue=?",
                     ["_outbox:w"],
                 )
     finally:
@@ -73,13 +73,13 @@ async def test_outbox_retries_on_exception(db_path):
     assert len(calls) >= 3
     # After the 3rd call succeeds and the job is ack'd, it's deleted.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["_outbox:w"]
+        "SELECT COUNT(*) AS c FROM _honker_jobs WHERE queue=?", ["_outbox:w"]
     )
     assert rows[0]["c"] == 0
 
 
 async def test_outbox_rollback_drops_enqueue(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     delivered = []
 
     async def deliver(payload):
@@ -95,13 +95,13 @@ async def test_outbox_rollback_drops_enqueue(db_path):
             raise RuntimeError("business error")
 
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["_outbox:w"]
+        "SELECT COUNT(*) AS c FROM _honker_jobs WHERE queue=?", ["_outbox:w"]
     )
     assert rows[0]["c"] == 0
 
 
 async def test_outbox_enqueue_in_tx_atomic(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     delivered = []
 
     def deliver(payload):
@@ -128,7 +128,7 @@ async def test_outbox_enqueue_in_tx_atomic(db_path):
 
 
 def test_outbox_instance_memoized(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     def f(_):
         pass
@@ -140,7 +140,7 @@ def test_outbox_instance_memoized(db_path):
 
 def test_outbox_requires_callable_delivery(db_path):
     """Fail fast: non-callable delivery blows up at construction, not in worker."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     with pytest.raises(TypeError):
         db.outbox("w", delivery=None)
     with pytest.raises(TypeError):
@@ -148,7 +148,7 @@ def test_outbox_requires_callable_delivery(db_path):
 
 
 async def test_outbox_eventually_dies_after_max_attempts(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     calls: list = []
 
     async def always_fail(payload):
@@ -164,25 +164,25 @@ async def test_outbox_eventually_dies_after_max_attempts(db_path):
     try:
         for _ in range(300):
             state = db.query(
-                "SELECT state FROM _joblite_jobs WHERE queue=?",
+                "SELECT state FROM _honker_jobs WHERE queue=?",
                 ["_outbox:w"],
             )
             if state and state[0]["state"] == "dead":
                 break
             await asyncio.sleep(0.02)
-            # Retried jobs live in _joblite_live until claimed again.
+            # Retried jobs live in _honker_live until claimed again.
             with db.transaction() as tx:
                 tx.execute(
-                    "UPDATE _joblite_live SET run_at=unixepoch() - 1 WHERE queue=?",
+                    "UPDATE _honker_live SET run_at=unixepoch() - 1 WHERE queue=?",
                     ["_outbox:w"],
                 )
     finally:
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
 
-    # Final row lives in _joblite_dead after max_attempts reached.
+    # Final row lives in _honker_dead after max_attempts reached.
     rows = db.query(
-        "SELECT state, attempts, last_error FROM _joblite_jobs WHERE queue=?",
+        "SELECT state, attempts, last_error FROM _honker_jobs WHERE queue=?",
         ["_outbox:w"],
     )
     assert rows[0]["state"] == "dead"
@@ -193,7 +193,7 @@ async def test_outbox_eventually_dies_after_max_attempts(db_path):
 
 async def test_outbox_sync_delivery_function(db_path):
     """Regression: plain sync callables must work, not just coroutine functions."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     delivered = []
 
     def sync_deliver(payload):
@@ -219,7 +219,7 @@ async def test_stuck_handler_past_visibility_timeout_is_reclaimed(db_path):
     """The core durability story of the outbox + queue: if a worker's handler
     hangs past its visibility_timeout_s, a second worker can reclaim the job,
     and the stuck worker's eventual ack fails loudly."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     stuck_started = asyncio.Event()
     stuck_attempted_ack: list = []
@@ -289,7 +289,7 @@ async def test_stuck_handler_past_visibility_timeout_is_reclaimed(db_path):
     # The job is done exactly once; ack DELETEd the processing row, so
     # there's nothing left in any table.
     rows = db.query(
-        "SELECT COUNT(*) AS c FROM _joblite_jobs WHERE queue=?", ["stuck-q"]
+        "SELECT COUNT(*) AS c FROM _honker_jobs WHERE queue=?", ["stuck-q"]
     )
     assert rows[0]["c"] == 0
 
@@ -297,7 +297,7 @@ async def test_stuck_handler_past_visibility_timeout_is_reclaimed(db_path):
 async def test_heartbeat_prevents_reclaim_for_long_running_job(db_path):
     """The flip side: a legitimately long handler that heartbeats must not
     get its claim stolen."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     q = db.queue("long", visibility_timeout_s=1)
     q.enqueue({"n": 1})
 
@@ -336,7 +336,7 @@ async def test_heartbeat_prevents_reclaim_for_long_running_job(db_path):
 
 async def test_outbox_worker_stops_cleanly_on_cancel(db_path):
     """run_worker must exit promptly on asyncio cancellation."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
 
     async def deliver(payload):
         pass

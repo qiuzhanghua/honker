@@ -4,16 +4,16 @@ import asyncio
 
 import pytest
 
-import joblite
+import honker
 
 
 def test_publish_and_read_back(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     s.publish({"a": 1})
     s.publish({"a": 2}, key="k")
     rows = db.query(
-        "SELECT offset, topic, key, payload FROM _joblite_stream ORDER BY offset"
+        "SELECT offset, topic, key, payload FROM _honker_stream ORDER BY offset"
     )
     assert len(rows) == 2
     assert rows[0]["key"] is None
@@ -21,30 +21,30 @@ def test_publish_and_read_back(db_path):
 
 
 def test_publish_in_tx_atomic_with_business_write(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     with db.transaction() as tx:
         tx.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         tx.execute("INSERT INTO users (id) VALUES (?)", [1])
         s.publish({"u": 1}, tx=tx)
     assert db.query("SELECT COUNT(*) AS c FROM users")[0]["c"] == 1
-    assert db.query("SELECT COUNT(*) AS c FROM _joblite_stream")[0]["c"] == 1
+    assert db.query("SELECT COUNT(*) AS c FROM _honker_stream")[0]["c"] == 1
 
 
 def test_rollback_drops_published_event(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     with pytest.raises(RuntimeError):
         with db.transaction() as tx:
             tx.execute("CREATE TABLE x (id INTEGER)")
             s.publish({"lost": True}, tx=tx)
             raise RuntimeError("boom")
-    rows = db.query("SELECT COUNT(*) AS c FROM _joblite_stream")
+    rows = db.query("SELECT COUNT(*) AS c FROM _honker_stream")
     assert rows[0]["c"] == 0
 
 
 def test_offset_save_is_monotonic(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     s.save_offset("c", 5)
     s.save_offset("c", 3)  # lower: ignored
@@ -53,7 +53,7 @@ def test_offset_save_is_monotonic(db_path):
 
 
 async def test_subscribe_replays_then_goes_live(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     for i in range(3):
         s.publish({"i": i})
@@ -78,7 +78,7 @@ async def test_subscribe_replays_then_goes_live(db_path):
 
 
 async def test_subscribe_from_offset_skips_earlier(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     for i in range(3):
         s.publish({"i": i})
@@ -98,7 +98,7 @@ async def test_subscribe_from_offset_skips_earlier(db_path):
 
 
 async def test_subscribe_with_named_consumer_resumes(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     for i in range(5):
         s.publish({"i": i})
@@ -123,7 +123,7 @@ async def test_named_consumer_auto_saves_offset_every_n_events(db_path):
     every N yielded events through a single UPSERT, instead of per-event.
     The saved offset lags the last-yielded offset by up to N-1.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("autosave")
     for i in range(25):
         s.publish({"i": i})
@@ -152,7 +152,7 @@ async def test_named_consumer_auto_saves_offset_every_s_seconds(db_path):
     """Time-based threshold: even a low-volume stream flushes within
     save_every_s. Using 0.1s + small N so the time path triggers.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("autosave-time")
 
     async def consume():
@@ -182,7 +182,7 @@ async def test_named_consumer_auto_saves_offset_every_s_seconds(db_path):
 async def test_named_consumer_auto_save_disabled(db_path):
     """save_every_n=0 and save_every_s=0 disables auto-save. The
     consumer row stays at its initial offset even after many events."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("no-autosave")
     for i in range(50):
         s.publish({"i": i})
@@ -207,7 +207,7 @@ async def test_named_consumer_crash_replays_from_last_saved_offset(db_path):
     yielded event, so a handler crash re-delivers in-flight events on
     reconnect.
     """
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("crash")
     for i in range(15):
         s.publish({"i": i})
@@ -245,7 +245,7 @@ async def test_named_consumer_crash_replays_from_last_saved_offset(db_path):
 
 
 async def test_two_consumers_at_different_offsets(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     for i in range(4):
         s.publish({"i": i})
@@ -264,7 +264,7 @@ async def test_two_consumers_at_different_offsets(db_path):
 
 
 def test_stream_instance_memoized(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     assert db.stream("a") is db.stream("a")
     assert db.stream("a") is not db.stream("b")
 
@@ -273,7 +273,7 @@ async def test_subscribe_no_race_between_first_read_and_listen(db_path):
     """Regression: an event published between `_read_since` and listener
     subscription used to be lost until the 15 s keepalive. The iterator now
     registers the listener at construction time so it never misses events."""
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
 
     got = []
@@ -300,7 +300,7 @@ async def test_subscribe_no_race_between_first_read_and_listen(db_path):
 
 
 async def test_many_concurrent_subscribers_same_stream(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
 
     async def collect(n_expected):
@@ -322,7 +322,7 @@ async def test_many_concurrent_subscribers_same_stream(db_path):
 
 
 def test_payload_types_round_trip(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     s.publish({"d": 1})
     s.publish([1, 2, 3])
@@ -330,7 +330,7 @@ def test_payload_types_round_trip(db_path):
     s.publish(42)
     s.publish(None)
     rows = db.query(
-        "SELECT payload FROM _joblite_stream ORDER BY offset"
+        "SELECT payload FROM _honker_stream ORDER BY offset"
     )
     import json as j
     assert [j.loads(r["payload"]) for r in rows] == [
@@ -345,7 +345,7 @@ def test_non_json_serializable_payload_raises_typeerror(db_path):
     import datetime
     import decimal
 
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
 
     with pytest.raises(TypeError):
@@ -362,7 +362,7 @@ def test_non_json_serializable_payload_raises_typeerror(db_path):
         s.publish(Custom())
 
     # Nothing was persisted from the failed calls.
-    assert db.query("SELECT COUNT(*) AS c FROM _joblite_stream")[0]["c"] == 0
+    assert db.query("SELECT COUNT(*) AS c FROM _honker_stream")[0]["c"] == 0
 
 
 def test_non_json_serializable_fails_before_honk_fires(db_path):
@@ -371,7 +371,7 @@ def test_non_json_serializable_fails_before_honk_fires(db_path):
     publish on the same stream still works."""
     import decimal
 
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
 
     with pytest.raises(TypeError):
@@ -379,19 +379,19 @@ def test_non_json_serializable_fails_before_honk_fires(db_path):
 
     # Subsequent valid publish must succeed and be visible.
     s.publish({"ok": True})
-    rows = db.query("SELECT payload FROM _joblite_stream")
+    rows = db.query("SELECT payload FROM _honker_stream")
     assert len(rows) == 1
     import json as _j
     assert _j.loads(rows[0]["payload"]) == {"ok": True}
 
 
 def test_large_payload_round_trips(db_path):
-    db = joblite.open(db_path)
+    db = honker.open(db_path)
     s = db.stream("events")
     big = {"blob": "x" * 100_000}
     s.publish(big)
     rows = db.query(
-        "SELECT payload FROM _joblite_stream WHERE topic=?", ["events"]
+        "SELECT payload FROM _honker_stream WHERE topic=?", ["events"]
     )
     import json as j
     assert j.loads(rows[0]["payload"]) == big

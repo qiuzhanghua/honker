@@ -2,7 +2,7 @@
 members = [
     "honker-core",
     "honker-extension",
-    "packages/litenotify",
-    "packages/litenotify-node",
+    "packages/honker",
+    "packages/honker-node",
 ]
 resolver = "2"

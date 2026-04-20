@@ -1,7 +1,7 @@
 {
-  "name": "@litenotify/node",
+  "name": "@honker/node",
   "version": "0.1.0",
-  "description": "Node binding for litenotify — cross-process SQLite NOTIFY/LISTEN, 0.5ms wake latency.",
+  "description": "Node binding for honker — cross-process SQLite NOTIFY/LISTEN, 0.5ms wake latency.",
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
@@ -32,6 +32,6 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/russellromney/litenotify-joblite"
+    "url": "https://github.com/russellromney/honker"
   }
 }

@@ -18,10 +18,10 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packages"))
-import joblite  # noqa: E402
+import honker  # noqa: E402
 
 
-def bench_enqueue(db: joblite.Database, n: int) -> dict:
+def bench_enqueue(db: honker.Database, n: int) -> dict:
     q = db.queue("bench")
     start = time.perf_counter()
     for i in range(n):
@@ -30,7 +30,7 @@ def bench_enqueue(db: joblite.Database, n: int) -> dict:
     return {"n": n, "elapsed_s": elapsed, "ops_per_s": n / elapsed}
 
 
-def bench_claim_ack(db: joblite.Database, n: int) -> dict:
+def bench_claim_ack(db: honker.Database, n: int) -> dict:
     q = db.queue("bench")
     start = time.perf_counter()
     acked = 0
@@ -44,7 +44,7 @@ def bench_claim_ack(db: joblite.Database, n: int) -> dict:
     return {"n": acked, "elapsed_s": elapsed, "ops_per_s": acked / elapsed}
 
 
-def bench_claim_batch_ack_batch(db: joblite.Database, n: int, batch: int = 32) -> dict:
+def bench_claim_batch_ack_batch(db: honker.Database, n: int, batch: int = 32) -> dict:
     """One claim_batch + one ack_batch per batch. 2 tx per `batch` jobs, not
     2 tx per job."""
     q = db.queue("bench-batched")
@@ -69,7 +69,7 @@ def bench_claim_batch_ack_batch(db: joblite.Database, n: int, batch: int = 32) -
     }
 
 
-async def bench_end_to_end(db: joblite.Database, n: int) -> dict:
+async def bench_end_to_end(db: honker.Database, n: int) -> dict:
     q = db.queue("bench-e2e")
     latencies: list = []
     done = asyncio.Event()
@@ -119,7 +119,7 @@ async def main():
 
     d = tempfile.mkdtemp()
     path = os.path.join(d, "bench.db")
-    db = joblite.open(path)
+    db = honker.open(path)
 
     enq = bench_enqueue(db, args.n)
     print(

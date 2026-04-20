@@ -52,9 +52,9 @@ import sys
 import time
 
 sys.path.insert(0, {packages!r})
-import joblite
+import honker
 
-db = joblite.open({db_path!r})
+db = honker.open({db_path!r})
 
 
 async def main():
@@ -94,9 +94,9 @@ def run_sample(db_path: str, timeout_s: float) -> float:
 
         # Commit the notify. Import here so each sample's parent
         # handle is fresh (no shared writer slot across samples).
-        import joblite  # noqa: E402
+        import honker  # noqa: E402
 
-        db = joblite.open(db_path)
+        db = honker.open(db_path)
         t0 = time.perf_counter()
         with db.transaction() as tx:
             tx.notify("wake", {"ts": t0})
@@ -130,8 +130,8 @@ def main():
         db_path = os.path.join(d, "wake.db")
         # Touch the WAL so first-sample latency doesn't swallow
         # journal-mode bootstrap.
-        import joblite
-        db = joblite.open(db_path)
+        import honker
+        db = honker.open(db_path)
         with db.transaction() as tx:
             tx.execute("CREATE TABLE _warmup (i INTEGER)")
         del db

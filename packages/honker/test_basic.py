@@ -1,5 +1,5 @@
 import asyncio
-import litenotify
+import honker
 import os
 
 
@@ -7,7 +7,7 @@ async def main():
     if os.path.exists("test.db"):
         os.remove("test.db")
 
-    db = litenotify.open("test.db")
+    db = honker.open("test.db")
 
     with db.transaction() as tx:
         tx.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, total REAL)")
