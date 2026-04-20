@@ -16,3 +16,6 @@
 [submodule "site"]
 	path = site
 	url = git@github.com:russellromney/honker-site.git
+[submodule "packages/honker-node"]
+	path = packages/honker-node
+	url = git@github.com:russellromney/honker-node.git
