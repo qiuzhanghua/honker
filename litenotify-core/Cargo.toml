@@ -11,6 +11,7 @@ name = "litenotify_core"
 # regular Cargo dependency by the three binding crates.
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 parking_lot = "0.12.5"
 rusqlite = { version = "0.39.0", features = ["functions", "hooks"] }
 thiserror = "2.0.18"

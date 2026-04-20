@@ -48,49 +48,17 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-
-def _parse_field(field: str, lo: int, hi: int) -> frozenset[int]:
-    """Parse one cron field into the set of valid integer values.
-
-    Supports:
-      - `*` (any value in [lo, hi])
-      - `N` (single value)
-      - `N-M` (inclusive range)
-      - `*/K` (every K starting at lo)
-      - `N-M/K` (range with step)
-      - `N,M,P,...` (list; each part can use the above syntax)
-    """
-    values: set[int] = set()
-    for part in field.split(","):
-        step = 1
-        if "/" in part:
-            range_part, step_str = part.split("/", 1)
-            step = int(step_str)
-            if step <= 0:
-                raise ValueError(f"cron step must be positive: {part!r}")
-        else:
-            range_part = part
-        if range_part == "*":
-            start, end = lo, hi
-        elif "-" in range_part:
-            a, b = range_part.split("-", 1)
-            start, end = int(a), int(b)
-        else:
-            start = end = int(range_part)
-        if start < lo or end > hi or start > end:
-            raise ValueError(
-                f"cron field {part!r} out of range [{lo},{hi}] or inverted"
-            )
-        for v in range(start, end + 1, step):
-            values.add(v)
-    return frozenset(values)
+import litenotify
 
 
 class CronSchedule:
-    """A parsed 5-field cron expression.
+    """Thin marker around a 5-field cron expression. All parsing and
+    next-boundary computation lives in Rust (`litenotify.cron_next_after`
+    / `jl_cron_next_after`) so every language binding shares one
+    implementation.
 
     Fields (standard Unix cron):
       - minute       (0-59)
@@ -99,56 +67,30 @@ class CronSchedule:
       - month        (1-12)
       - day-of-week  (0-6, Sunday=0)
 
-    Datetime arithmetic uses the system's local time zone — same as
+    Calendar arithmetic runs in the system local time zone — same as
     standard cron. Set `TZ=UTC` in the scheduler's environment if you
     want UTC boundaries.
     """
 
-    __slots__ = ("_minutes", "_hours", "_days", "_months", "_dows", "_expr")
+    __slots__ = ("expr",)
 
     def __init__(self, expr: str):
-        parts = expr.split()
-        if len(parts) != 5:
-            raise ValueError(
-                f"crontab requires 5 fields "
-                f"(minute hour dom month dow); got {len(parts)}: {expr!r}"
-            )
-        self._expr = expr
-        self._minutes = _parse_field(parts[0], 0, 59)
-        self._hours = _parse_field(parts[1], 0, 23)
-        self._days = _parse_field(parts[2], 1, 31)
-        self._months = _parse_field(parts[3], 1, 12)
-        self._dows = _parse_field(parts[4], 0, 6)
+        # Validate eagerly by asking Rust to compute one boundary from
+        # a known timestamp. Raises ValueError on malformed input
+        # (field count, out-of-range, inverted range, bad step).
+        litenotify.cron_next_after(expr, 0)
+        self.expr = expr
 
     def __repr__(self) -> str:
-        return f"crontab({self._expr!r})"
-
-    def matches(self, dt: datetime) -> bool:
-        """True iff `dt` (minute precision) matches all 5 fields."""
-        # Python weekday(): Monday=0 .. Sunday=6.
-        # Cron dow:         Sunday=0 .. Saturday=6.
-        cron_dow = (dt.weekday() + 1) % 7
-        return (
-            dt.minute in self._minutes
-            and dt.hour in self._hours
-            and dt.day in self._days
-            and dt.month in self._months
-            and cron_dow in self._dows
-        )
+        return f"crontab({self.expr!r})"
 
     def next_after(self, dt: datetime) -> datetime:
         """Return the next datetime strictly after `dt` matching this
-        schedule, at minute precision. Raises `ValueError` if no match
-        exists within ~5 years (catches degenerate schedules).
+        schedule, at minute precision. Pure function — no db needed.
+        Raises `ValueError` if no match exists within ~5 years.
         """
-        next_dt = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        # Cap iterations at ~5 years' worth of minutes.
-        for _ in range(5 * 366 * 24 * 60):
-            if self.matches(next_dt):
-                return next_dt
-            next_dt += timedelta(minutes=1)
-        raise ValueError(
-            f"no cron match found within 5 years after {dt}: {self!r}"
+        return datetime.fromtimestamp(
+            litenotify.cron_next_after(self.expr, int(dt.timestamp()))
         )
 
 

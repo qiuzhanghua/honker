@@ -494,9 +494,21 @@ fn open(path: String, max_readers: usize) -> PyResult<Database> {
     Database::new(path, max_readers)
 }
 
+/// Compute the next unix timestamp strictly after `from_unix` that
+/// matches `expr`, at minute precision, in the system local time zone.
+/// Pure function — no database needed. Raises `ValueError` on a
+/// malformed cron expression. Used by `joblite.CronSchedule` so the
+/// parser + next-boundary math lives once in Rust.
+#[pyfunction]
+fn cron_next_after(expr: String, from_unix: i64) -> PyResult<i64> {
+    litenotify_core::cron::next_after_unix(&expr, from_unix)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+}
+
 #[pymodule]
 fn litenotify(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
+    m.add_function(wrap_pyfunction!(cron_next_after, m)?)?;
     m.add_class::<Database>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<WalEvents>()?;

@@ -1,7 +1,10 @@
-"""Tests for joblite.Scheduler and the crontab parser.
+"""Tests for joblite.Scheduler and the Rust-backed crontab parser.
 
 Scheduler has two separate concerns:
-  1. Cron parsing (pure — test directly).
+  1. Cron parsing + next-boundary (pure Rust; tested via the Python
+     facade). Low-level parser tests live alongside the Rust
+     implementation (`litenotify-core/src/cron.rs`); here we only
+     exercise the Python-facing API.
   2. Fire-due logic (pure — test with a mock `now`).
   3. Live scheduler loop (integration — hard to test without waiting
      for real cron boundaries; covered by a minimal happy-path test
@@ -15,58 +18,9 @@ import pytest
 
 import joblite
 from joblite import crontab, Scheduler
-from joblite._scheduler import _parse_field
 
 
-# ---------- _parse_field ----------
-
-
-def test_parse_field_any():
-    assert _parse_field("*", 0, 59) == frozenset(range(0, 60))
-
-
-def test_parse_field_single():
-    assert _parse_field("30", 0, 59) == frozenset([30])
-
-
-def test_parse_field_range():
-    assert _parse_field("10-14", 0, 59) == frozenset([10, 11, 12, 13, 14])
-
-
-def test_parse_field_step():
-    # */15 starting from 0 = {0, 15, 30, 45}
-    assert _parse_field("*/15", 0, 59) == frozenset([0, 15, 30, 45])
-
-
-def test_parse_field_range_with_step():
-    assert _parse_field("0-30/10", 0, 59) == frozenset([0, 10, 20, 30])
-
-
-def test_parse_field_list():
-    assert _parse_field("1,5,30", 0, 59) == frozenset([1, 5, 30])
-
-
-def test_parse_field_combined():
-    # "0,*/20" = 0 ∪ {0, 20, 40} = {0, 20, 40}
-    assert _parse_field("0,*/20", 0, 59) == frozenset([0, 20, 40])
-
-
-def test_parse_field_out_of_range_raises():
-    with pytest.raises(ValueError):
-        _parse_field("60", 0, 59)
-
-
-def test_parse_field_inverted_range_raises():
-    with pytest.raises(ValueError):
-        _parse_field("30-10", 0, 59)
-
-
-def test_parse_field_zero_step_raises():
-    with pytest.raises(ValueError):
-        _parse_field("*/0", 0, 59)
-
-
-# ---------- crontab() / CronSchedule.matches / next_after ----------
+# ---------- crontab() / CronSchedule.next_after ----------
 
 
 def test_crontab_field_count_validated():
@@ -76,31 +30,21 @@ def test_crontab_field_count_validated():
         crontab("* * * * * *")    # 6 fields
 
 
-def test_crontab_matches_minute():
-    c = crontab("*/15 * * * *")
-    assert c.matches(datetime(2025, 1, 1, 12, 0))
-    assert c.matches(datetime(2025, 1, 1, 12, 15))
-    assert c.matches(datetime(2025, 1, 1, 12, 30))
-    assert c.matches(datetime(2025, 1, 1, 12, 45))
-    assert not c.matches(datetime(2025, 1, 1, 12, 1))
-    assert not c.matches(datetime(2025, 1, 1, 12, 16))
+def test_crontab_out_of_range_validated():
+    with pytest.raises(ValueError):
+        crontab("60 * * * *")
+    with pytest.raises(ValueError):
+        crontab("* 24 * * *")
 
 
-def test_crontab_matches_daily():
-    c = crontab("0 3 * * *")
-    assert c.matches(datetime(2025, 1, 1, 3, 0))
-    assert c.matches(datetime(2025, 6, 15, 3, 0))
-    assert not c.matches(datetime(2025, 1, 1, 3, 30))
-    assert not c.matches(datetime(2025, 1, 1, 4, 0))
+def test_crontab_inverted_range_validated():
+    with pytest.raises(ValueError):
+        crontab("30-10 * * * *")
 
 
-def test_crontab_matches_dow():
-    # Mondays at noon (Mon=1 in cron).
-    c = crontab("0 12 * * 1")
-    # 2025-01-06 is a Monday.
-    assert c.matches(datetime(2025, 1, 6, 12, 0))
-    # 2025-01-07 is Tuesday.
-    assert not c.matches(datetime(2025, 1, 7, 12, 0))
+def test_crontab_zero_step_validated():
+    with pytest.raises(ValueError):
+        crontab("*/0 * * * *")
 
 
 def test_crontab_next_after_hourly():

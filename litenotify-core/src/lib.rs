@@ -32,6 +32,7 @@
 //! entry-point symbols, row-materialization into Python dicts or JS
 //! objects — stays in the respective binding crate.
 
+pub mod cron;
 mod joblite_ops;
 
 pub use joblite_ops::attach_joblite_functions;

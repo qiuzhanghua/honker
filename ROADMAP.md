@@ -119,7 +119,7 @@ each new binding is. Six-commit refactor:
   `Scheduler._record_fire`, `Queue.save_result`, `Queue.get_result`,
   `Queue.sweep_results`) with calls to the corresponding `jl_*`
   function. ~200 LOC reduction.
-- [ ] **4. Cron parser to Rust.** `jl_cron_next_after(expr, from_unix)
+- [x] **4. Cron parser to Rust.** `jl_cron_next_after(expr, from_unix)
   -> unix_ts`. Python's `CronSchedule` class collapses to a marker
   holding the expression string; `next_after()` is one SQL call. 100
   lines of Python parsing deleted.

@@ -277,6 +277,21 @@ pub fn attach_joblite_functions(conn: &Connection) -> rusqlite::Result<()> {
         },
     )?;
 
+    // jl_cron_next_after(expr, from_unix) -> unix_ts of next boundary
+    // strictly after `from_unix`, minute precision, system local time.
+    // Same 5-field grammar as standard Unix cron. Deterministic +
+    // pure; marked DETERMINISTIC to let SQLite optimize inside joins.
+    conn.create_scalar_function(
+        "jl_cron_next_after",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let expr: String = ctx.get(0)?;
+            let from_unix: i64 = ctx.get(1)?;
+            super::cron::next_after_unix(&expr, from_unix).map_err(to_sql_err)
+        },
+    )?;
+
     Ok(())
 }
 
