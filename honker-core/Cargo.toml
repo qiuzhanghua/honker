@@ -2,8 +2,13 @@
 name = "honker-core"
 version = "0.1.0"
 edition = "2024"
-description = "Shared Rust core for honker bindings (PyO3, SQLite loadable extension, napi-rs). Not intended for direct use."
+description = "Shared Rust foundation for Honker bindings (SQLite loadable extension, PyO3, napi-rs, and friends). Not intended for direct use."
 license = "Apache-2.0"
+repository = "https://github.com/russellromney/honker"
+homepage = "https://honker.dev"
+readme = "README.md"
+keywords = ["sqlite", "queue", "pubsub", "notify", "honker"]
+categories = ["database", "concurrency"]
 
 [lib]
 name = "honker_core"
