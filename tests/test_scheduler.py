@@ -225,6 +225,82 @@ def test_scheduler_tick_catches_up_multiple_boundaries(db_path):
     assert int(row["next_fire_at"]) == orig_next + 3600
 
 
+def test_scheduler_tick_racing_writers_produce_no_duplicates(db_path):
+    """Multiple workers calling `jl_scheduler_tick` concurrently
+    must never double-fire a boundary.
+
+    In production the `joblite-scheduler` leader lock gates callers —
+    only one process holds it at a time. But the lock is advisory at
+    the application layer; if a future binding forgets to acquire
+    it, or a test misuses the API, the underlying SQL must still be
+    safe. This proves that `BEGIN IMMEDIATE` + the advance-then-
+    return contract in `scheduler_tick` means at most one ticker
+    observes an unfired boundary.
+
+    Strategy: register one task with `next_fire_at = now - 1` (one
+    boundary overdue), fire 10 Python threads each running one
+    `SELECT jl_scheduler_tick(now)` through its own writer
+    transaction. Exactly one thread should see the fire, nine
+    should see `[]`. The job lands in `_joblite_live` exactly once.
+    """
+    import threading
+
+    db = joblite.open(db_path)
+    db.queue("race-q")
+    sched = Scheduler(db)
+    sched.add(
+        name="one",
+        queue="race-q",
+        schedule=crontab("* * * * *"),  # every minute
+    )
+    # Force exactly one boundary overdue.
+    row = db.query(
+        "SELECT next_fire_at FROM _joblite_scheduler_tasks WHERE name='one'"
+    )[0]
+    boundary = int(row["next_fire_at"])
+    with db.transaction() as tx:
+        tx.execute(
+            "UPDATE _joblite_scheduler_tasks "
+            "SET next_fire_at = ? WHERE name = 'one'",
+            [boundary - 60],
+        )
+    # Tick at `boundary - 60 + 1`: exactly one boundary should be
+    # eligible to fire (the rewound one), not two.
+    now = boundary - 60 + 1
+
+    fire_counts: list = [0] * 10
+    barrier = threading.Barrier(10)
+
+    def worker(i: int) -> None:
+        # Synchronize starts so threads race, rather than serializing
+        # trivially through Python's GIL + thread scheduling.
+        barrier.wait()
+        with db.transaction() as tx:
+            rows = tx.query("SELECT jl_scheduler_tick(?) AS j", [now])
+        fires = json.loads(rows[0]["j"])
+        fire_counts[i] = len(fires)
+
+    threads = [
+        threading.Thread(target=worker, args=(i,)) for i in range(10)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    # Exactly one ticker saw the fire; nine saw nothing.
+    total_fires = sum(fire_counts)
+    assert total_fires == 1, (
+        f"expected 1 total fire across 10 concurrent tickers, "
+        f"got {total_fires}: {fire_counts}"
+    )
+    # And the queue has exactly one job, not ten.
+    rows = db.query(
+        "SELECT COUNT(*) AS c FROM _joblite_live WHERE queue='race-q'"
+    )
+    assert rows[0]["c"] == 1
+
+
 async def test_scheduler_run_with_stop_event(db_path):
     """Happy-path integration: start a scheduler with a *very* fast
     schedule, fire at least once, stop via stop_event, return cleanly.
