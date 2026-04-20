@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel in-progress runs for a branch when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-core:
+    name: rust · honker-core (lib tests)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        # Shallow checkout; the submodules aren't needed for rust-core.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - run: cargo test -p honker-core --release --lib
+
+  rust-extension:
+    name: rust · honker-extension (build)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Build loadable extension
+        run: cargo build --release -p honker-extension
+      - name: Sanity-load via Python sqlite3
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import sqlite3
+
+          ext = None
+          for cand in (
+              "target/release/libhonker_ext.dylib",
+              "target/release/libhonker_ext.so",
+          ):
+              if os.path.exists(cand):
+                  ext = cand
+                  break
+          assert ext, "extension artifact not found"
+
+          conn = sqlite3.connect(":memory:")
+          conn.enable_load_extension(True)
+          conn.load_extension(ext)
+          conn.execute("SELECT honker_bootstrap()")
+          conn.commit()
+
+          cur = conn.execute(
+              "SELECT honker_cron_next_after('0 3 * * *', 0)"
+          ).fetchone()
+          assert cur[0] > 0
+          print(f"honker_cron_next_after → {cur[0]}")
+          PY
+
+  python:
+    name: python · honker
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dev deps (uv)
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Create venv + install
+        run: |
+          uv venv .venv
+          . .venv/bin/activate
+          uv pip install pytest pytest-asyncio pytest-xdist
+      - name: Build honker-extension
+        run: cargo build --release -p honker-extension
+      - name: Run pytest
+        run: |
+          . .venv/bin/activate
+          python -m pytest tests/ -q
+
+  node:
+    name: node · honker-node
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need the node submodule + core crate it path-deps.
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Build .node binary
+        working-directory: packages/honker-node
+        run: |
+          npm install
+          npx napi build --platform --release
+      - name: Test
+        working-directory: packages/honker-node
+        run: npm test
