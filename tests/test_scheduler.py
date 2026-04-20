@@ -13,7 +13,7 @@ Scheduler has two separate concerns:
 
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
