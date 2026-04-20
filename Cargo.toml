@@ -2,6 +2,7 @@
 members = [
     "honker-core",
     "honker-extension",
+    "packages/honker",
     "packages/honker-node",
 ]
 resolver = "2"

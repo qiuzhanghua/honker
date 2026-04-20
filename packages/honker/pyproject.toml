@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "honker"
 version = "0.1.0"
-description = "Durable queue, stream, and cross-process pub/sub for SQLite."
+description = "Durable queue, stream, and cross-process pub/sub for SQLite. Built on honker."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Russell Romney" }]
@@ -19,7 +19,10 @@ classifiers = [
   "Topic :: Database",
   "Topic :: System :: Distributed Computing",
 ]
-dependencies = []
+dependencies = [
+  # honker-core is loaded as a dynamic library; no pip dep needed.
+  # The Rust cdylib (built via maturin) IS the honker package.
+]
 
 [project.urls]
 Homepage = "https://github.com/russellromney/honker"
@@ -28,11 +31,3 @@ Repository = "https://github.com/russellromney/honker"
 [tool.setuptools]
 packages = ["honker"]
 package-dir = { "honker" = "." }
-
-[tool.setuptools.package-data]
-# Ship the loadable extension alongside the Python sources. Built out
-# of tree via `cargo build -p honker-extension --release` and copied
-# into this dir before `python -m build` (or via cibuildwheel per-
-# platform). Without a bundled `.dylib`/`.so`/`.dll`, `_honker_native`
-# falls back to `HONKER_EXTENSION_PATH` or the dev repo's `target/`.
-honker = ["libhonker_ext.*"]

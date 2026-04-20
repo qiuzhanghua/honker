@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 
 
 def _core_open(path, max_readers):
-    from honker._honker_native import open as _open
+    from _honker_native import open as _open
     return _open(path, max_readers=max_readers)
 
 
@@ -70,9 +70,8 @@ class Listener:
         self._buffer: deque = deque()
         # Subscribe BEFORE the MAX(id) snapshot so a publish landing in
         # the window between the two is captured in our mpsc channel
-        # rather than firing to nobody. The __anext__ loop's SELECT-then-
-        # wait would catch it either way, but eager subscribe matches
-        # _StreamIter / _WorkerQueueIter and keeps the invariant uniform.
+        # rather than firing to nobody. Regression guard:
+        # tests/test_subscribe_race.py.
         self._wal = db.wal_events()
         rows = db.query(
             "SELECT COALESCE(MAX(id), 0) AS m "
@@ -400,11 +399,10 @@ class Queue:
         forever. Raises `asyncio.TimeoutError` on expiry.
         """
         deadline = time.time() + float(timeout) if timeout is not None else None
-        # Subscribe BEFORE the first get_result so a save landing between
-        # "not yet" and "start listening" can't fire its WAL tick to no
-        # subscriber. The shared watcher buffers ticks from subscribe()
-        # onward, so the first wait_for() consumes any that arrived
-        # during the initial check.
+        # Subscribe BEFORE the first check so a worker saving the result
+        # in the window between get_result() and wal_events() fires a
+        # wake into our mpsc channel rather than to nobody. Regression
+        # guard: tests/test_subscribe_race.py.
         wal = self.db.wal_events()
         found, value = self.get_result(job_id)
         if found:
@@ -968,12 +966,6 @@ class Database:
         `db.stream(...)` rather than `tx.notify(...)`; the stream's
         consumer-offset tracking is a better fit than trying to keep
         the notifications buffer large.
-
-        Warning: listeners offline or slow during a prune silently
-        skip any events pruned past their `last_seen`. There is no
-        re-delivery mechanism for `notify`; rows deleted here are
-        gone. If your consumers need to tolerate downtime, use a
-        stream.
         """
         conditions: list = []
         params: list = []
@@ -1074,10 +1066,10 @@ class _WorkerQueueIter:
         self.queue = queue
         self.worker_id = worker_id
         self.idle_poll_s = idle_poll_s
-        # Subscribe BEFORE the first claim so an enqueue landing between
-        # "claim returned empty" and "start listening" can't fire its WAL
-        # tick to no subscriber. The shared watcher buffers ticks into
-        # our mpsc channel from the moment subscribe() returns.
+        # Subscribe eagerly so a commit landing between the first
+        # claim_batch() and the first wal_events() is buffered in our
+        # mpsc channel rather than firing to nobody. Regression guard:
+        # tests/test_subscribe_race.py.
         self._wal = queue.db.wal_events()
 
     def __aiter__(self):

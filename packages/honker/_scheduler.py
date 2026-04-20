@@ -52,7 +52,7 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from honker import _honker_native
+import _honker_native
 
 
 class CronSchedule:
