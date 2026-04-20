@@ -133,6 +133,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+      # cross_lang.js spawns `.venv/bin/python` to verify Python ↔ Node
+      # share the same .db. So the node job also needs Python with the
+      # honker package + _honker_native cdylib installed.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv + maturin
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Create venv + build Python extension
+        run: |
+          uv venv .venv
+          . .venv/bin/activate
+          uv pip install maturin
+          cd packages/honker
+          maturin develop --release
       - name: Build .node binary
         working-directory: packages/honker-node
         run: |
