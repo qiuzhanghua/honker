@@ -52,16 +52,6 @@ def ext_db_path(tmp_path):
 
 
 @pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
-@pytest.mark.xfail(
-    sys.platform == "linux",
-    reason=(
-        "Ubuntu stdlib sqlite3 + honker_bootstrap: DELETE mode set "
-        "via PRAGMA reports as 'delete' but honker_bootstrap's "
-        "internal WAL check doesn't raise. Passes on macOS. Needs "
-        "investigation in the extension's WAL-mode query."
-    ),
-    strict=False,
-)
 def test_bootstrap_rejects_non_wal_connection(ext_db_path):
     """`honker_bootstrap` on a file-backed DB that isn't in WAL mode
     must fail loudly. Without this, the extension would install tables
