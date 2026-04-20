@@ -26,16 +26,8 @@ on:
           - honker-core
           - honker-extension
 
-# Same source-tree hash pattern as ci.yml. If we're publishing, we
-# explicitly want cache hits to match the sources being published.
-env:
-  RUST_CACHE_KEY_SOURCES: >-
-    ${{ hashFiles(
-      'honker-core/src/**/*.rs',
-      'honker-core/Cargo.toml',
-      'honker-extension/src/**/*.rs',
-      'honker-extension/Cargo.toml'
-    ) }}
+# Source-tree hash pinning lives per-job (hashFiles() can't run at
+# workflow level before checkout). See ci.yml for context.
 
 jobs:
   publish:
@@ -45,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-src-${{ env.RUST_CACHE_KEY_SOURCES }}"
+          prefix-key: "v1-src-${{ hashFiles('honker-core/src/**/*.rs', 'honker-core/Cargo.toml', 'honker-extension/src/**/*.rs', 'honker-extension/Cargo.toml') }}"
 
       - name: Determine crate
         id: crate
