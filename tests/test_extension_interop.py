@@ -30,13 +30,67 @@ _SKIP_REASON = (
     "run `cargo build -p honker-extension --release` first"
 )
 
+# Some Python distributions (notably the python.org macOS builds used
+# by actions/setup-python) compile stdlib sqlite3 without
+# SQLITE_ENABLE_LOAD_EXTENSION, so `conn.enable_load_extension` is
+# missing. Skip the interop tests in that case — the Python binding
+# itself uses rusqlite under the hood and is fine; only this
+# cross-binding test needs extension loading via stdlib sqlite3.
+_HAS_LOAD_EXT = hasattr(sqlite3.connect(":memory:"), "enable_load_extension")
+_LOAD_EXT_SKIP = (
+    "Python's stdlib sqlite3 is compiled without "
+    "SQLITE_ENABLE_LOAD_EXTENSION on this runner"
+)
+
+_SKIP = (_EXT_PATH is None) or (not _HAS_LOAD_EXT)
+_SKIP_REASON = _SKIP_REASON if _EXT_PATH is None else _LOAD_EXT_SKIP
+
 
 @pytest.fixture
 def ext_db_path(tmp_path):
     return str(tmp_path / "interop.db")
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
+def test_bootstrap_rejects_non_wal_connection(ext_db_path):
+    """`honker_bootstrap` on a file-backed DB that isn't in WAL mode
+    must fail loudly. Without this, the extension would install tables
+    on a journal_mode=DELETE connection and the user would watch their
+    workers silently never fire (no WAL file = no stat-poll signal).
+    Phase Shakedown (d)."""
+    conn = sqlite3.connect(ext_db_path)
+    conn.enable_load_extension(True)
+    conn.load_extension(_EXT_PATH)
+    # Explicit — sqlite3 default for file DBs is "delete" unless set.
+    conn.execute("PRAGMA journal_mode=DELETE")
+    with pytest.raises(sqlite3.OperationalError, match="journal_mode=WAL"):
+        conn.execute("SELECT honker_bootstrap()")
+    conn.close()
+
+
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
+def test_bootstrap_succeeds_on_wal_connection(ext_db_path):
+    """The positive counterpart: once WAL is set, `honker_bootstrap`
+    installs the schema as normal. Regression guard in case the WAL
+    check becomes over-eager. Phase Shakedown (d)."""
+    conn = sqlite3.connect(ext_db_path)
+    conn.enable_load_extension(True)
+    conn.load_extension(_EXT_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("SELECT honker_bootstrap()")
+    # Bootstrap idempotent — second call must also succeed.
+    conn.execute("SELECT honker_bootstrap()")
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name LIKE '_honker_%' ORDER BY name"
+    ).fetchall()
+    names = [r[0] for r in rows]
+    assert "_honker_live" in names
+    assert "_honker_dead" in names
+    conn.close()
+
+
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_and_python_share_schema(ext_db_path):
     """``honker_bootstrap`` + Python's ``_init_schema`` must produce a
     schema Python can operate on without errors. The earlier extension
@@ -47,6 +101,7 @@ def test_extension_and_python_share_schema(ext_db_path):
     conn = sqlite3.connect(ext_db_path)
     conn.enable_load_extension(True)
     conn.load_extension(_EXT_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("SELECT honker_bootstrap()")
     conn.close()
 
@@ -74,7 +129,7 @@ def test_extension_and_python_share_schema(ext_db_path):
     assert dead[0]["last_error"] == "forced failure for schema check"
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_honker_ack_deletes_row(ext_db_path):
     """``honker_ack_batch`` must DELETE the row (match Python ``Queue.ack``)
     rather than UPDATE ``state='done'`` and leave it in ``_honker_live``
@@ -117,7 +172,7 @@ def test_extension_honker_ack_deletes_row(ext_db_path):
     )
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_registers_notify_function(ext_db_path):
     """Loading the extension must also register ``notify()`` + the
     ``_honker_notifications`` table. The extension's docstring has
@@ -142,10 +197,15 @@ def test_extension_registers_notify_function(ext_db_path):
 
 def _open_ext(path: str):
     """Open an sqlite3 conn with the extension loaded and the schema
-    bootstrapped. Helper for the interop tests below."""
+    bootstrapped. Helper for the interop tests below.
+
+    Sets `journal_mode=WAL` before bootstrap because `honker_bootstrap`
+    now asserts WAL (Phase Shakedown (d)) — without WAL, cross-process
+    wakes can't fire and the honker tables silently become useless."""
     conn = sqlite3.connect(path)
     conn.enable_load_extension(True)
     conn.load_extension(_EXT_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("SELECT honker_bootstrap()")
     conn.commit()
     return conn
@@ -154,7 +214,7 @@ def _open_ext(path: str):
 # ---------- honker_sweep_expired ----------
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_sweep_expired_moves_to_dead(ext_db_path):
     """`honker_sweep_expired(queue)` must produce the same result as
     Python's `Queue.sweep_expired()`: delete pending rows whose
@@ -190,7 +250,7 @@ def test_extension_sweep_expired_moves_to_dead(ext_db_path):
     assert all(r["last_error"] == "expired" for r in dead)
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_sweep_expired_is_idempotent(ext_db_path):
     db = honker.open(ext_db_path)
     q = db.queue("exp-idem")
@@ -206,7 +266,7 @@ def test_extension_sweep_expired_is_idempotent(ext_db_path):
 # ---------- honker_lock_acquire / honker_lock_release ----------
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_lock_acquire_release(ext_db_path):
     """`honker_lock_acquire` returns 1 on first acquire, 0 if held by
     another owner, 1 again after release. Mirrors Python's `_Lock`.
@@ -238,7 +298,7 @@ def test_extension_lock_acquire_release(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_lock_prunes_stale(ext_db_path):
     """If a holder's TTL has elapsed, a new acquirer gets the lock."""
     conn = _open_ext(ext_db_path)
@@ -256,7 +316,7 @@ def test_extension_lock_prunes_stale(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_lock_interops_with_python(ext_db_path):
     """Python's `db.lock()` and extension `honker_lock_acquire` use the
     same table. Acquiring from one side blocks the other."""
@@ -282,7 +342,7 @@ def test_extension_lock_interops_with_python(ext_db_path):
 # ---------- honker_rate_limit_try / honker_rate_limit_sweep ----------
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_rate_limit_try(ext_db_path):
     conn = _open_ext(ext_db_path)
     for _ in range(3):
@@ -303,7 +363,7 @@ def test_extension_rate_limit_try(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_rate_limit_interops_with_python(ext_db_path):
     """Extension-side `honker_rate_limit_try` and Python's
     `db.try_rate_limit` share the same table and window."""
@@ -328,7 +388,7 @@ def test_extension_rate_limit_interops_with_python(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_rate_limit_sweep(ext_db_path):
     conn = _open_ext(ext_db_path)
     conn.execute(
@@ -351,7 +411,7 @@ def test_extension_rate_limit_sweep(ext_db_path):
 # ---------- honker_scheduler_register / honker_scheduler_tick / _unregister ----------
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_scheduler_register_and_tick(ext_db_path):
     """`honker_scheduler_register` inserts a task row; `honker_scheduler_tick`
     fires due boundaries and advances `next_fire_at`."""
@@ -406,7 +466,7 @@ def test_extension_scheduler_register_and_tick(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_scheduler_interops_with_python(ext_db_path):
     """Python `Scheduler.add` and the extension's
     `_honker_scheduler_tasks` write to the same table — both sides
@@ -428,7 +488,7 @@ def test_extension_scheduler_interops_with_python(ext_db_path):
 # ---------- honker_result_save / honker_result_get / honker_result_sweep ----------
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_result_save_and_get(ext_db_path):
     conn = _open_ext(ext_db_path)
     # ttl=0 means no expiration.
@@ -444,7 +504,7 @@ def test_extension_result_save_and_get(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_result_save_upserts(ext_db_path):
     """Second save for the same id replaces the first."""
     conn = _open_ext(ext_db_path)
@@ -457,7 +517,7 @@ def test_extension_result_save_upserts(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_result_get_filters_expired(ext_db_path):
     """Extension get() returns NULL for a row whose expires_at has
     passed (same filter semantics as Python's `get_result`)."""
@@ -481,7 +541,7 @@ def test_extension_result_get_filters_expired(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_result_ttl_absolute(ext_db_path):
     """ttl_s>0 is interpreted as seconds-from-now; the extension
     stores `unixepoch() + ttl_s` as expires_at."""
@@ -497,7 +557,7 @@ def test_extension_result_ttl_absolute(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_result_interops_with_python(ext_db_path):
     """Extension-side save is readable from Python and vice versa —
     one `_honker_results` table."""
@@ -522,7 +582,7 @@ def test_extension_result_interops_with_python(ext_db_path):
 # ---------- honker_enqueue / honker_ack / honker_retry / honker_fail / honker_heartbeat ----------
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_enqueue_returns_id_and_fires_notify(ext_db_path):
     """`honker_enqueue` INSERTs a row, returns its id, and pushes a
     'new' notification on `honker:<queue>` so waiting workers wake.
@@ -550,7 +610,7 @@ def test_extension_enqueue_returns_id_and_fires_notify(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_enqueue_delay_overrides_run_at(ext_db_path):
     """Delay wins over run_at per the documented precedence."""
     conn = _open_ext(ext_db_path)
@@ -566,7 +626,7 @@ def test_extension_enqueue_delay_overrides_run_at(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_enqueue_expires_sets_absolute(ext_db_path):
     """expires=60 → expires_at = now + 60."""
     conn = _open_ext(ext_db_path)
@@ -580,7 +640,7 @@ def test_extension_enqueue_expires_sets_absolute(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_ack_singular(ext_db_path):
     """honker_ack(job_id, worker_id) DELETEs and returns 1 on success,
     0 if the claim isn't ours."""
@@ -609,7 +669,7 @@ def test_extension_ack_singular(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_retry_flips_back_and_fires_wake(ext_db_path):
     """honker_retry flips the claim back to pending with run_at pushed,
     and notifies the queue's channel so waiting workers re-poll."""
@@ -649,7 +709,7 @@ def test_extension_retry_flips_back_and_fires_wake(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_retry_exhausted_moves_to_dead(ext_db_path):
     """If attempts >= max_attempts at retry time, honker_retry moves the
     row to _honker_dead with last_error set, instead of flipping
@@ -680,7 +740,7 @@ def test_extension_retry_exhausted_moves_to_dead(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_fail_unconditional(ext_db_path):
     """honker_fail always moves the claim to dead regardless of
     attempts vs max_attempts."""
@@ -704,7 +764,7 @@ def test_extension_fail_unconditional(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_heartbeat_extends_claim(ext_db_path):
     """honker_heartbeat pushes claim_expires_at forward by extend_s."""
     conn = _open_ext(ext_db_path)
@@ -738,7 +798,7 @@ def test_extension_heartbeat_extends_claim(ext_db_path):
     conn.close()
 
 
-@pytest.mark.skipif(_EXT_PATH is None, reason=_SKIP_REASON)
+@pytest.mark.skipif(_SKIP, reason=_SKIP_REASON)
 def test_extension_enqueue_interops_with_python(ext_db_path):
     """Extension honker_enqueue and Python Queue.enqueue hit the same
     table. IDs are the same PRIMARY KEY sequence. Each side can
