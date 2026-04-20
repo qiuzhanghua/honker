@@ -7,3 +7,6 @@
 [submodule "packages/honker-ruby"]
 	path = packages/honker-ruby
 	url = git@github.com:russellromney/honker-ruby.git
+[submodule "packages/honker-bun"]
+	path = packages/honker-bun
+	url = git@github.com:russellromney/honker-bun.git
