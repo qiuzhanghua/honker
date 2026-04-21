@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/honker-logo.png" width="220" alt="honker logo" />
+</p>
+
 # honker
 
 `honker` is a SQLite extension + language bindings that add Postgres-style `NOTIFY`/`LISTEN` semantics to SQLite, with built-in durable pub/sub, task queue, and event streams, without client polling or a daemon/broker.
