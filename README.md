@@ -1,64 +1,57 @@
 # honker
 
-honker is a task queue, durable pub/sub, and cron scheduler that lives inside your SQLite `.db` file. Cross-process wake latency is ~0.7 ms p50 / ~2 ms p99 on an M-series laptop — no polling, no broker, no daemon.
+`honker` is a SQLite extension + language bindings that add Postgres-style `NOTIFY`/`LISTEN` semantics to SQLite, with built-in durable pub/sub, task queue, and event streams — no daemon/broker or client polling.
 
-It also ships as a plain SQLite loadable extension, so any language that can `SELECT load_extension('honker')` gets the same queue, streams, and notifications on the same file.
+`honker` works by adding messages/tasks to tables in SQLite, and takes advantage of event notifications on SQLite's WAL file to replace a polling interval with push semantics achieving cross-process notifications with single-digit millisecond latency.
 
-> honker is **pre-1.0**. It is new and may contain bugs. Tested end-to-end on macOS and Linux.
+> Experimental. API may change.
 
-SQLite is getting used for things it wasn't built for: [Bluesky's PDS](https://github.com/bluesky-social/atproto/tree/main/packages/pds), [Fly's LiteFS](https://fly.io/docs/litefs/), [Turso](https://turso.tech/), the app you wrote in a weekend that is now somehow in production. Once real work flows through a SQLite-backed app, you need a queue. The usual answer is "add Redis + Celery." That works, but it introduces a second datastore with its own backup story, a dual-write problem between your business table and the queue, and the operational overhead of running a broker.
+## At a glance
 
-honker takes the approach that if SQLite is the primary datastore, the queue should live in the same file. That means `INSERT INTO orders` and `queue.enqueue(...)` commit in the same transaction. Rollback drops both. The queue is just rows in a table with a partial index.
+```python
+import honker
 
-Design inspiration: [`pg_notify`](https://www.postgresql.org/docs/current/sql-notify.html) (fast triggers, no retry/visibility), [Huey](https://github.com/coleifer/huey) (SQLite-backed Python), [pg-boss](https://github.com/timgit/pg-boss) and [Oban](https://github.com/sorentwo/oban) (the Postgres-side gold standards we're chasing on SQLite). If you already run Postgres, use those — the wins here are specific to the SQLite shape.
+db = honker.open("app.db")
+emails = db.queue("emails")
 
-honker ships as a [Rust crate](https://crates.io/crates/honker) (`honker`, plus `honker-core`/`honker-extension`), a [SQLite loadable extension](#sqlite-extension-any-sqlite-39-client), and language packages: Python (`honker`), Node (`@honker/node`), Ruby (`honker`), Go, Bun, Elixir. The on-disk layout is defined once in Rust; every binding reads the same tables.
+# Enqueue
+emails.enqueue({"to": "alice@example.com"})
 
-## What's in the box
+# Consume (worker process)
+async for job in emails.claim("worker-1"):
+    send(job.payload)
+    job.ack()
+```
 
-A work queue with visibility timeouts, retries, priorities, delayed jobs, task expiration, and a dead-letter table. Durable pub/sub streams with per-consumer offsets (replay on reconnect). Ephemeral `tx.notify(channel, payload)` pub/sub — `pg_notify` semantics. A cron-style scheduler with leader election and missed-boundary catch-up. Named locks with TTL, fixed-window rate limits, opt-in task result storage.
+Any enqueue can be atomic with a business write. Rollback drops both.
 
-Framework plugins for FastAPI/Django/Flask/Express/Rails are intentionally not shipped — wiring honker in is ~20 lines of glue. See `examples/` for patterns.
+```python
+with db.transaction() as tx:
+    tx.execute("INSERT INTO orders (user_id) VALUES (?)", [42])
+    emails.enqueue({"to": "alice@example.com"}, tx=tx)
+```
 
-Out of scope: task pipelines, chains, groups, chords, multi-writer replication, workflow orchestration with DAGs. If you need those, Oban or Temporal are better targets.
+## Features
 
-## Performance
+Today:
 
-Apple Silicon M-series, release build, WAL + `synchronous=NORMAL`, 2026-04. Median of 3 runs.
+- Notify/listen across processes on one `.db` file
+- Durable streams with per-consumer offsets
+- Work queues with retries, priority, delayed jobs, and a dead-letter table
+- Any send can be atomic with your business write (commit together or roll back together)
+- Single-digit millisecond cross-process reaction time, no polling
+- Handler timeouts, declarative retries with exponential backoff
+- Delayed jobs, task expiration, named locks, rate-limiting
+- Crontab-style periodic tasks with a leader-elected scheduler
+- Opt-in task result storage (`enqueue` returns an id, worker persists the
+  return value, caller awaits `queue.wait_result(id)`)
+- Durable streams with per-consumer offsets and configurable flush interval
+- SQLite loadable extension so any SQLite client can read the same tables
+- Bindings: Python, Node.js, Rust, Go, Ruby, Bun, Elixir
 
-| Operation                          | Throughput | Notes |
-|------------------------------------|-----------:|-------|
-| `enqueue` (single tx)              |    6,000/s | ~170 µs/job |
-| `enqueue` (100 jobs / tx)          |  110,000/s | amortized |
-| `claim + ack` (1 job, 2 tx)        |    3,700/s | ~270 µs/job |
-| `claim_batch + ack_batch` (n=32)   |   60,000/s | |
-| `claim_batch + ack_batch` (n=128)  |   80,000/s | |
-| `stream.publish` (1 / tx)          |    5,800/s | |
-| `stream` replay                    | 1,000,000/s | in-memory iterator |
+Framework-specific helpers (FastAPI/Django/Flask/Express/Rails) are intentionally not shipped — honker's API is small enough that wiring it into a web framework is ~20 lines of glue. See `examples/` for patterns.
 
-Cross-process wake latency, measured via a Python parent → Python subprocess listener (`bench/wake_latency_bench.py`):
-
-| Metric | Latency |
-|--------|--------:|
-| p50    | **0.71 ms** |
-| p90    | 0.81 ms |
-| p99    | 1.98 ms |
-
-These aren't ceilings — raw Python `sqlite3` single-tx on the same file measures ~47k ops/s, so there's room in per-tx overhead. Batched enqueue at 110k/s is already faster than raw `sqlite3` single-tx because SQLite writes fewer WAL pages when inserts amortize into one transaction.
-
-Pinned in CI: `tests/test_cross_process_wake_latency.py` asserts p99 < 100 ms. `tests/test_performance_floors.py` asserts 10k enqueues in < 3 s. Full numbers: `bench/README.md`.
-
-## Why not X?
-
-| Tool             | Fits when                              | Atomic `INSERT` + enqueue? |
-|------------------|-----------------------------------------|----------------------------|
-| Redis + Celery   | Multi-host Python workers               | No (dual-write problem)    |
-| RabbitMQ / SQS   | Cross-team, multi-language, many hosts  | No (separate system)       |
-| pg-boss / Oban   | You already run Postgres                | Yes, but Postgres-shaped   |
-| Huey (SQLite)    | Single-process Python                   | Limited; no durable pub/sub or cross-language |
-| **honker**       | SQLite-backed apps, one machine         | **Yes**                    |
-
-honker is for single-machine (or local-replica) setups where SQLite is already the primary datastore. For multi-host fan-out, use a real broker.
+Deliberately out of scope: task pipelines/chains/groups/chords, multi-writer replication, workflow orchestration with DAGs.
 
 ## Quick start
 
