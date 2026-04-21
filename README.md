@@ -1,10 +1,20 @@
 # honker
 
-`honker` is a SQLite extension + language bindings that add Postgres-style `NOTIFY`/`LISTEN` semantics to SQLite, with built-in durable pub/sub, task queue, and event streams — no daemon/broker or client polling.
+`honker` is a SQLite extension + language bindings that add Postgres-style `NOTIFY`/`LISTEN` semantics to SQLite, with built-in durable pub/sub, task queue, and event streams, without client polling or a daemon/broker.
 
-`honker` works by adding messages/tasks to tables in SQLite, and takes advantage of event notifications on SQLite's WAL file to replace a polling interval with push semantics achieving cross-process notifications with single-digit millisecond latency.
+`honker` works by adding messages/tasks to tables in SQLite, and takes advantage of event notifications on SQLite's WAL file to replace a polling interval with push semantics, enabling cross-process notifications with single-digit millisecond delivery.
+
+Its basic form is a plain SQLite loadable extension, so any language that can `SELECT load_extension('honker')` gets the same queue, streams, and notifications on the same file.
 
 > Experimental. API may change.
+
+SQLite is backing real work which inevitably requires pubsub and a queue. The usual answer is "add Redis + Celery." That works, but it introduces a second datastore with its own backup story, a dual-write problem between your business table and the queue, and the operational overhead of running a broker.
+
+honker takes the approach that if SQLite is the primary datastore, the queue should live in the same file. That means `INSERT INTO orders` and `queue.enqueue(...)` commit in the same transaction. Rollback drops both. The queue is just rows in a table with a partial index.
+
+honker ships as a [Rust crate](https://crates.io/crates/honker) (`honker`, plus `honker-core`/`honker-extension`), a [SQLite loadable extension](#sqlite-extension-any-sqlite-39-client), and language packages: Python (`honker`), Node (`@honker/node`), Ruby (`honker`), Go, Bun, Elixir. The on-disk layout is defined once in Rust; every binding reads the same tables.
+
+Prior art:  [`pg_notify`](https://www.postgresql.org/docs/current/sql-notify.html) (fast triggers, no retry/visibility), [Huey](https://github.com/coleifer/huey) (SQLite-backed Python), [pg-boss](https://github.com/timgit/pg-boss) and [Oban](https://github.com/sorentwo/oban) (the Postgres-side gold standards we're chasing on SQLite). If you already run Postgres, use those, as they are excellent.
 
 ## At a glance
 
@@ -36,7 +46,6 @@ with db.transaction() as tx:
 Today:
 
 - Notify/listen across processes on one `.db` file
-- Durable streams with per-consumer offsets
 - Work queues with retries, priority, delayed jobs, and a dead-letter table
 - Any send can be atomic with your business write (commit together or roll back together)
 - Single-digit millisecond cross-process reaction time, no polling
@@ -51,15 +60,15 @@ Today:
 
 Framework-specific helpers (FastAPI/Django/Flask/Express/Rails) are intentionally not shipped — honker's API is small enough that wiring it into a web framework is ~20 lines of glue. See `examples/` for patterns.
 
-Deliberately out of scope: task pipelines/chains/groups/chords, multi-writer replication, workflow orchestration with DAGs.
+Deliberately not built: task pipelines/chains/groups/chords, multi-writer replication, workflow orchestration with DAGs.
 
-## Quick start
+## Quick start 
+
+### Python — queue (durable at-least-once work)
 
 ```bash
 pip install honker
 ```
-
-### Python — queue (durable at-least-once work)
 
 ```python
 import honker
@@ -161,9 +170,9 @@ The extension shares `_honker_live`, `_honker_dead`, and `_honker_notifications`
 
 ## Design
 
-This repo includes the `honker` SQLite loadable extension and bindings for Python, Node, Rust, Go, Ruby, Bun, and Elixir. Framework-specific plugins are deliberately not shipped — wiring honker into a web framework is ~20 lines of glue, and we'd rather keep that as cookbook examples than maintain one package per framework.
+This repo includes the `honker` SQLite loadable extension and bindings for Python, Node, Rust, Go, Ruby, Bun, and Elixir. 
 
-For most applications, [SQLite alone is sufficient](https://www.epicweb.dev/why-you-should-probably-be-using-sqlite). There are already great libraries that leverage SQLite for durable messaging. [Huey](https://github.com/coleifer/huey) is one; [`diskcache`](https://github.com/grantjenks/python-diskcache) is another. This project is inspired by them and seeks to do something similar across languages and frameworks by moving package logic into a SQLite extension.
+For most applications, [SQLite alone is sufficient](https://www.epicweb.dev/why-you-should-probably-be-using-sqlite). There are already great libraries that leverage SQLite for durable messaging — [Huey](https://github.com/coleifer/huey) is the one honker draws the most from. This project is inspired by it and seeks to do something similar across languages and frameworks by moving package logic into a SQLite extension.
 
 For Postgres-backed apps, [`pg_notify`](https://www.postgresql.org/docs/current/sql-notify.html) + [pg-boss](https://github.com/timgit/pg-boss) or [Oban](https://hexdocs.pm/oban/) is the equivalent. This library is for apps where SQLite is the primary datastore.
 
@@ -257,7 +266,7 @@ The caller chooses retention per primitive. `db.prune_notifications(older_than_s
 
 ## Wiring into your web framework
 
-Honker ships no framework plugins. It doesn't need to — the API is small and the integration is a few lines of glue:
+Honker ships no framework plugins. API is small and the integration is a few lines of glue:
 
 ```python
 # FastAPI: enqueue in a request, run workers via lifespan.
@@ -289,16 +298,22 @@ Handles thousands of messages per second on a modern laptop, with cross-process 
 Layout:
 
 ```
-honker-core/              # Rust rlib shared across all bindings
-honker-extension/         # SQLite loadable extension (cdylib)
+honker-core/              # Rust rlib shared across all bindings (in-tree, published on crates.io)
+honker-extension/         # SQLite loadable extension (cdylib, published on crates.io)
 packages/
   honker/                 # Python package (PyO3 cdylib + Queue/Stream/Outbox/Scheduler)
-  honker-node/            # napi-rs Node.js binding
+  honker-node/            # napi-rs Node.js binding           [git submodule]
+  honker-rs/              # ergonomic Rust wrapper            [git submodule]
+  honker-go/              # Go binding                        [git submodule]
+  honker-ruby/            # Ruby binding                      [git submodule]
+  honker-bun/             # Bun binding                       [git submodule]
+  honker-ex/              # Elixir binding                    [git submodule]
 tests/                    # integration tests (cross-package)
 bench/                    # benches
+site/                     # honker.dev (Astro)                [git submodule]
 ```
 
-Each `packages/*` directory is self-contained (own `Cargo.toml` / `pyproject.toml` / `package.json`) and is intended to become its own repository published as a git submodule into this directory. Today it lives inline for fast iteration while the APIs settle.
+Each binding repo is published independently (PyPI / npm / crates.io / Hex / RubyGems) and pinned here as a git submodule; `honker-core` + `honker-extension` live in-tree since they're the shared foundation every binding depends on. Clone with `git clone --recursive` or run `git submodule update --init --recursive` after a normal clone.
 
 ```bash
 make test                   # default: rust + python + node (fast, ~10s)
