@@ -6,7 +6,7 @@ Short notes on repo layout, tests, and releases.
 
 - `honker-core/` — shared Rust crate (rlib). Published to crates.io.
 - `honker-extension/` — SQLite loadable extension (cdylib). Published to crates.io.
-- `packages/honker-{py,node,rs,go,ruby,bun,ex}/` — language bindings. Each lives in its own GitHub repo and is git-submoduled here.
+- `packages/honker-{py,node,rs,go,ruby,bun,ex,cpp}/` — language bindings. Each lives in its own GitHub repo and is git-submoduled here.
 - `site/` — honker.dev (Astro Starlight; git submodule).
 - `tests/` — cross-binding integration tests.
 
