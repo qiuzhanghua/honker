@@ -840,6 +840,12 @@ pub fn scheduler_register(
            next_fire_at = excluded.next_fire_at",
         rusqlite::params![name, queue, cron_expr, payload, priority, expires_s, next_fire_at],
     )?;
+    // Wake any sleeping scheduler leader so it re-computes
+    // honker_scheduler_soonest() against the new task set. Without
+    // this, a leader that went to sleep for an hour before a newly-
+    // registered 1-minute-from-now task existed would oversleep past
+    // its first fire.
+    scheduler_wake(conn)?;
     Ok(1)
 }
 
@@ -848,7 +854,26 @@ pub fn scheduler_unregister(conn: &Connection, name: &str) -> rusqlite::Result<i
         "DELETE FROM _honker_scheduler_tasks WHERE name = ?1",
         rusqlite::params![name],
     )?;
+    if n > 0 {
+        // Unregister can only make the "soonest" later, so a sleeping
+        // leader wouldn't miss anything by oversleeping. But waking it
+        // lets the loop observe the removal and notice if the table is
+        // now empty (soonest() returns 0 → leader exits cleanly).
+        scheduler_wake(conn)?;
+    }
     Ok(n as i64)
+}
+
+/// INSERT a row on channel `honker:scheduler` so a sleeping scheduler
+/// leader sitting on `wal_events()` wakes and re-evaluates. Payload
+/// is opaque — the leader doesn't read it, only the WAL tick matters.
+fn scheduler_wake(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO _honker_notifications (channel, payload)
+         VALUES ('honker:scheduler', 'wake')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// For each registered task whose `next_fire_at <= now_unix`,

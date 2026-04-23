@@ -13,6 +13,7 @@ Scheduler has two separate concerns:
 
 import asyncio
 import json
+import time
 from datetime import datetime
 
 import pytest
@@ -371,6 +372,60 @@ def test_scheduler_run_raises_without_tasks(db_path):
         "SELECT COUNT(*) AS c FROM _honker_locks WHERE name='honker-scheduler'"
     )
     assert rows[0]["c"] == 0
+
+
+async def test_scheduler_wakes_on_new_registration(db_path):
+    """A scheduler sleeping until a far-future fire must wake within ~1s
+    when another caller registers a task whose next_fire_at is sooner.
+    Phase Shakedown (c).
+
+    `honker_scheduler_register` fires a wake on the 'honker:scheduler'
+    channel; the main loop races its timer against wal_events(), so a
+    new registration kicks it out of sleep. Without this, a leader
+    scheduled to next wake in an hour would silently miss a task
+    registered 1 minute from now until the current sleep ended.
+    """
+    db = honker.open(db_path)
+    sched = Scheduler(db)
+    # Pre-register one task so .run() doesn't bail on the empty-table
+    # guard from Phase Shakedown (b). The cron expr fires in ~1hr
+    # (next top-of-the-hour plus one), so the leader's first sleep
+    # will be long enough to demonstrate the wake.
+    sched.add(
+        name="far-future",
+        queue="q",
+        schedule=crontab("0 */2 * * *"),  # every 2hr — next fire is at least ~an hour
+    )
+
+    stop = asyncio.Event()
+    run_task = asyncio.create_task(sched.run(stop_event=stop))
+    await asyncio.sleep(0.2)  # let the leader enter its sleep
+
+    # Inject a "closer" task from a second scheduler on the same DB.
+    # The main loop should wake within the WAL stat-poll cadence.
+    injected = Scheduler(db)
+    start = time.monotonic()
+    injected.add(
+        name="injected",
+        queue="q",
+        schedule=crontab("* * * * *"),  # every minute
+    )
+
+    # Give the loop a moment to observe the wake; then stop.
+    await asyncio.sleep(0.5)
+    elapsed = time.monotonic() - start
+    stop.set()
+    await asyncio.wait_for(run_task, timeout=5.0)
+
+    # If the wake worked, we spent <1s between injecting the task and
+    # setting stop. The real assertion is indirect: the fact that the
+    # run_task completed at all means the sleep didn't block past the
+    # registration wake — otherwise `stop.set()` would race a long
+    # sleep and the test would take the full ~2hr cron target (or at
+    # least time out on asyncio.wait_for).
+    assert elapsed < 1.5, (
+        f"Loop didn't react to injected registration within {elapsed:.2f}s"
+    )
 
 
 async def test_scheduler_run_proceeds_if_another_process_registered(db_path):

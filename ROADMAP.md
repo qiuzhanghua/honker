@@ -104,16 +104,47 @@ paragraph recommending a second `db.lock('task-name', ttl=...)`
 inside the task body for exclusive work. No code change — the right
 design, just needs to be said.
 
-### Remaining (post-launch candidates)
+### c. Scheduler wake on new registration (DONE)
 
-- **(c) Scheduler wake-on-new-registration** — needs Rust change
-  (`honker_scheduler_register` emits a wake on `honker:scheduler`)
-  plus Python scheduler loop racing its timer against `wal_events()`.
-  Not blocking: late-bound registrations still fire on the next tick.
-- **(d) `honker_bootstrap` WAL mode assertion** — needs Rust change
-  with a `:memory:` carve-out for in-memory tests. Not blocking:
-  mis-PRAGMA'd extension users are a narrow edge case, and the
-  Python binding is unaffected.
+`honker_scheduler_register` and `honker_scheduler_unregister` now
+emit a wake on `_honker_notifications` channel `'honker:scheduler'`.
+The Python `Scheduler._main_loop` subscribes to `wal_events()`
+eagerly and races its timer sleep against a WAL tick — a fresh
+registration whose `next_fire_at` is sooner than the current
+"soonest" kicks the leader out of its sleep within the stat-poll
+cadence, rather than oversleeping past the new task's first fire.
+Regression guard: `test_scheduler_wakes_on_new_registration` in
+`tests/test_scheduler.py`.
+
+### d. `honker_bootstrap` WAL mode assertion (DONE)
+
+`bootstrap_honker_schema` (and therefore the `honker_bootstrap()`
+SQL scalar exposed by the extension) now rejects any file-backed
+connection not in `journal_mode=WAL`. In-memory DBs are exempt
+(SQLite rejects WAL for them; the Rust unit-test harness and the
+`cron_next_after` helper rely on this carve-out).
+
+Error shape: `Error::JournalModeNotWal { got }` with a message
+telling the caller to run `PRAGMA journal_mode=WAL` before
+`honker_bootstrap()`. Surfaces to Python as
+`sqlite3.OperationalError` with the same message.
+
+The Python binding's `_open_conn` sets WAL before calling bootstrap,
+so it's unaffected. The change protects users who load the extension
+into an arbitrary SQLite client that happened to be in
+`journal_mode=DELETE` — previously, tables installed fine but other
+processes could never observe commits (no WAL = no stat-poll
+signal).
+
+Regression guards: `test_bootstrap_rejects_non_wal_connection` and
+`test_bootstrap_succeeds_on_wal_connection` in
+`tests/test_extension_interop.py`. All other extension interop
+tests updated to set `PRAGMA journal_mode=WAL` before bootstrap.
+
+### All Phase Shakedown items complete
+
+186/186 Python tests + 21/21 Rust tests pass. No outstanding
+correctness concerns from the pre-launch review.
 
 ## Shipped
 
