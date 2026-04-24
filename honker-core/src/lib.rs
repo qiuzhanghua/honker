@@ -53,17 +53,6 @@ use std::time::Duration;
 pub enum Error {
     #[error("Database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error(
-        "honker requires journal_mode=WAL, got {got:?}. \
-         honker's cross-process wake and concurrent-reader model depend \
-         on WAL mode; DELETE / TRUNCATE / PERSIST / MEMORY / OFF are \
-         not supported by design — see the 'WAL-only' note in the honker \
-         README. Run this on the connection BEFORE honker_bootstrap():\n\
-         \n    PRAGMA journal_mode = WAL;\n\
-         \n\
-         (Set once per database; WAL mode persists on disk.)"
-    )]
-    JournalModeNotWal { got: String },
 }
 
 // ---------------------------------------------------------------------
@@ -247,33 +236,11 @@ pub const BOOTSTRAP_HONKER_SQL: &str = "
 /// Install the honker queue schema on `conn`. Idempotent. See
 /// [`BOOTSTRAP_HONKER_SQL`] for the DDL and rationale.
 ///
-/// Requires the connection to be in `journal_mode=WAL`. Cross-process
-/// wake works by polling `PRAGMA data_version` on the database
-/// file; a connection in any other journal mode would happily insert
-/// into `_honker_*` tables, but other processes would never observe
-/// those commits because the change-detection mechanism is WAL-only.
-/// Bootstrap fails loudly rather than silently setting the user up
-/// for "why don't my workers fire" later.
-///
-/// In-memory databases are exempt (SQLite rejects WAL mode for them)
-/// and only used by unit tests; nothing watches them anyway.
+/// Works in any journal mode. WAL mode is still the recommended
+/// default (concurrent readers, one writer, efficient fsync), but
+/// callers who know what they're doing can run honker tables on a
+/// DELETE-journal database. Cross-process wake is their responsibility.
 pub fn bootstrap_honker_schema(conn: &Connection) -> Result<(), Error> {
-    // `file` column is empty for in-memory DBs and for TEMP DBs; a
-    // file-backed DB will always have a non-empty path here.
-    let is_memory = conn
-        .query_row(
-            "SELECT file FROM pragma_database_list WHERE name = 'main'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .map(|s| s.is_empty())
-        .unwrap_or(true);
-    if !is_memory {
-        let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
-        if journal.to_lowercase() != "wal" {
-            return Err(Error::JournalModeNotWal { got: journal });
-        }
-    }
     conn.execute_batch(BOOTSTRAP_HONKER_SQL)?;
     Ok(())
 }
