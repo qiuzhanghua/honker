@@ -24,8 +24,8 @@
 //!     acquire, non-blocking try_acquire, and release.
 //!   - [`Readers`] — bounded pool of reader connections that open
 //!     lazily up to a max.
-//!   - [`WalWatcher`] — 1 ms FCNTL-polling thread that fires a
-//!     callback on every database commit. Uses `SQLITE_FCNTL_DATA_VERSION`
+//!   - [`WalWatcher`] — 1 ms PRAGMA-polling thread that fires a
+//!     callback on every database commit. Uses `PRAGMA data_version`
 //!     for precise change detection, with a periodic stat identity check
 //!     to detect file replacement. Bindings wrap this to surface wake
 //!     events to their language's async primitive.
@@ -248,7 +248,7 @@ pub const BOOTSTRAP_HONKER_SQL: &str = "
 /// [`BOOTSTRAP_HONKER_SQL`] for the DDL and rationale.
 ///
 /// Requires the connection to be in `journal_mode=WAL`. Cross-process
-/// wake works by polling `SQLITE_FCNTL_DATA_VERSION` on the database
+/// wake works by polling `PRAGMA data_version` on the database
 /// file; a connection in any other journal mode would happily insert
 /// into `_honker_*` tables, but other processes would never observe
 /// those commits because the change-detection mechanism is WAL-only.
@@ -592,7 +592,7 @@ impl Drop for WalWatcher {
 // Shared WAL watcher (one thread per Database, N subscribers)
 // ---------------------------------------------------------------------
 
-/// Shared database-file watcher: one FCNTL-poll thread per database
+/// Shared database-file watcher: one PRAGMA-poll thread per database
 /// path, N subscribers. Each [`subscribe`](Self::subscribe) returns a
 /// fresh `Receiver<()>` that sees a tick on every observed commit.
 ///
