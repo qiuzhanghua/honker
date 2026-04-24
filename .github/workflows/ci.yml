@@ -128,7 +128,13 @@ jobs:
       - name: Run pytest
         run: |
           . .venv/bin/activate
-          python -m pytest tests/ -q
+          # macOS runners deadlock under pytest-xdist with the WAL watcher
+          # thread (sqlite3 + PyO3 + process forking). Force single-process.
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            python -m pytest tests/ -q -n 1 --tb=short
+          else
+            python -m pytest tests/ -q --tb=short
+          fi
 
   node:
     name: node · honker-node
