@@ -200,17 +200,9 @@ The extension has three primitives that tie it together: ephemeral pub/sub (`not
 
 The explicit goal is to do `NOTIFY`/`LISTEN` semantics without constant polling, to achieve single-digit ms reaction time. If you use your app's existing SQLite file containing business logic, it will notify workers on every WAL commit. This means that most triggers will not result in anything happening: instead, workers just read the message/queue with no result. This "overtriggering" is on purpose and is the tradeoff for push semantics and fast reaction time.
 
-### WAL-only by design
+### WAL is the recommended default
 
-honker requires `journal_mode = WAL` on every database it manages. `honker_bootstrap()` refuses to run on a file-backed DB that isn't in WAL mode, and the language bindings set `PRAGMA journal_mode = WAL` in their default open path.
-
-- Workers hold open read views (WAL subscription channels, listener iterators) for their whole lifetime. In DELETE / TRUNCATE modes, writers take an EXCLUSIVE lock; every active reader blocks until release. A single worker actively claiming would serialize every `enqueue()` / `notify()` in the system behind it. WAL lets readers and writers coexist.
-- The `.db-wal` sidecar grows on every commit and only shrinks at checkpoint. Polling `PRAGMA data_version` gives a precise, monotonic commit counter. The rollback-journal sidecar (`.db-journal`) in DELETE mode appears mid-transaction and vanishes on commit, making it a poor poll target.
-- With `wal_autocheckpoint = 10000`, WAL performs one fsync per 10k pages instead of per-commit. Most of the throughput win comes from that.
-
-If you need a SQLite database that never enters WAL mode (e.g. for a backup target, or to avoid the `.db-wal` / `.db-shm` sidecars in a shared filesystem), honker is not the right tool. Use plain SQLite and live without the NOTIFY/LISTEN semantics.
-
-The library/extension is a small coordination layer built on the properties of SQLite and single-server architecture.
+The language bindings default to `journal_mode = WAL` because it gives concurrent readers with one writer, efficient fsync batching (`wal_autocheckpoint = 10000`), and a natural commit signal via `PRAGMA data_version`. If you prefer DELETE, TRUNCATE, or MEMORY mode, honker tables still work — you just lose cross-process wake (workers would need their own polling strategy).
 
 - One `.db` + one `.db-wal` is the entire system. You get every benefit of SQLite (embedded, local, durable, snapshot-able) that your app already uses.
 - WAL mode gives one writer and concurrent readers. Claim is one `UPDATE … RETURNING` via a partial index, ack is one `DELETE`.
@@ -319,7 +311,6 @@ Load `libhonker_ext` on your ORM's connection and call the SQL functions inside 
 def _load_honker(conn, _):
     conn.enable_load_extension(True)
     conn.load_extension("/path/to/libhonker_ext")
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("SELECT honker_bootstrap()")
 
 with Session(engine) as s, s.begin():
